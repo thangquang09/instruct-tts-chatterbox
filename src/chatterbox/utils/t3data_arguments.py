@@ -42,3 +42,9 @@ class DataArguments:
     ignore_verifications: bool = field(
         default=False, metadata={"help":"Set to true to ignore dataset verifications."}
     )
+    
+    # Instruction Prompt
+    instruction_column_name: str = field(
+        default="instruction", 
+        metadata={"help": "The name of the instruction/style column in the dataset. If missing, will use empty string."}
+    )

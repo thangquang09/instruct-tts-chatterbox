@@ -19,7 +19,8 @@ from transformers import (
     set_seed,
     TrainerCallback,
     Trainer,
-    PretrainedConfig
+    PretrainedConfig,
+    AutoTokenizer
 )
 from transformers import TrainingArguments as HfTrainingArguments
 from datasets import load_dataset, DatasetDict, VerificationMode, Audio
@@ -103,6 +104,12 @@ class DataArguments:
     ignore_verifications: bool = field(
         default=False, metadata={"help":"Set to true to ignore dataset verifications."}
     )
+    
+    # Instruction Prompt
+    instruction_column_name: str = field(
+        default="instruction", 
+        metadata={"help": "The name of the instruction/style column in the dataset. If missing, will use empty string."}
+    )
 
 # --- Dataset Class ---
 class SpeechFineTuningDataset(Dataset):
@@ -121,6 +128,12 @@ class SpeechFineTuningDataset(Dataset):
         self.text_tokenizer = chatterbox_model.tokenizer
         self.speech_tokenizer: S3Tokenizer = chatterbox_model.s3gen.tokenizer
         self.voice_encoder = chatterbox_model.ve
+        
+        print("Loading T5 Tokenizer for Instructions...")
+        self.instruction_tokenizer = AutoTokenizer.from_pretrained(
+            "google/flan-t5-large", 
+            use_fast=True
+        )
 
         self.s3_sr = S3_SR
         self.enc_cond_audio_len_samples = int(data_args.audio_prompt_duration_s * self.s3_sr)
@@ -129,9 +142,17 @@ class SpeechFineTuningDataset(Dataset):
         return len(self.dataset_source)
 
     def _load_audio_text_from_item(self, idx):
+        instruction_text = ""
+        
         if self.is_hf_format:
             item = self.dataset_source[idx]
             text = item[self.data_args.text_column_name]
+            
+            if self.data_args.instruction_column_name in item:
+                val = item[self.data_args.instruction_column_name]
+                if val is not None:
+                    instruction_text = str(val)
+            
             audio_data = item[self.data_args.audio_column_name]
             
             if isinstance(audio_data, str):
@@ -141,11 +162,11 @@ class SpeechFineTuningDataset(Dataset):
                 original_sr = audio_data["sampling_rate"]
             else:
                 logger.error(f"Unexpected audio data format for item {idx}: {type(audio_data)}. Skipping.")
-                return None, None
+                return None, None, None
 
             if not isinstance(wav_array, np.ndarray):
                 logger.error(f"Audio array is not numpy for item {idx}: {type(wav_array)}. Skipping.")
-                return None, None
+                return None, None, None
 
             if original_sr != self.s3_sr:
                 wav_16k = librosa.resample(wav_array, orig_sr=original_sr, target_sr=self.s3_sr)
@@ -158,20 +179,26 @@ class SpeechFineTuningDataset(Dataset):
 
             item_info_for_log = f"Item {idx} (text: '{text[:30]}...', audio_len: {len(wav_16k)}, audio_dtype: {wav_16k.dtype})"
 
-            return wav_16k, text
+            return wav_16k, text, instruction_text
         else:
             item = self.dataset_source[idx]
             audio_path = item["audio"]
             text = item["text"]
+            
+            if "instruction" in item:
+                instruction_text = item["instruction"]
+            elif self.data_args.instruction_column_name in item:
+                instruction_text = item[self.data_args.instruction_column_name]
+            
             try:
                 wav_16k, _ = librosa.load(audio_path, sr=self.s3_sr, mono=True)
-                return wav_16k, text
+                return wav_16k, text, instruction_text
             except Exception as e:
                 logger.error(f"Error loading audio {audio_path}: {e}")
-                return None, None
+                return None, None, None
 
     def __getitem__(self, idx) -> Optional[Dict[str, Union[torch.Tensor, float]]]:
-        wav_16k, text = self._load_audio_text_from_item(idx)
+        wav_16k, text, instruction_text = self._load_audio_text_from_item(idx)
         if wav_16k is None or text is None or len(wav_16k) == 0:
             return None
 
@@ -208,6 +235,16 @@ class SpeechFineTuningDataset(Dataset):
             speech_tokens = torch.cat([speech_tokens, torch.tensor([self.chatterbox_t3_config.stop_speech_token], device=speech_tokens.device)])
         speech_token_len = torch.tensor(len(speech_tokens), dtype=torch.long)
 
+        # Instruction 
+        instruction_input_ids = self.instruction_tokenizer(
+            instruction_text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512, # T5 limit, instruction hiếm khi dài hơn
+            add_special_tokens=True
+        ).input_ids.squeeze(0) # [Seq_Len]
+
+
         cond_audio_segment = wav_16k[:self.enc_cond_audio_len_samples]
         if len(cond_audio_segment) == 0 :
             cond_prompt_speech_tokens = torch.zeros(self.chatterbox_t3_config.speech_cond_prompt_len, dtype=torch.long)
@@ -240,6 +277,8 @@ class SpeechFineTuningDataset(Dataset):
             "t3_cond_speaker_emb": speaker_emb.float(),
             "t3_cond_prompt_speech_tokens": cond_prompt_speech_tokens.long(),
             "t3_cond_emotion_adv": emotion_adv_scalar_tensor,
+            
+            "instruction_input_ids": instruction_input_ids.long(),
         }
 
         return return_dict
@@ -250,6 +289,8 @@ class SpeechDataCollator:
     t3_config: T3Config  # Chatterbox T3Config
     text_pad_token_id: int
     speech_pad_token_id: int
+    
+    instruction_pad_token_id: int = 0
 
     def __call__(self, features: List[Optional[Dict[str, Any]]]) -> Dict[str, Any]:
         valid_features = [f for f in features if f is not None]
@@ -322,6 +363,21 @@ class SpeechDataCollator:
 
         labels_speech = shifted_speech.clone()          # (B, T_speech)
         labels_speech[mask_speech_total] = IGNORE_ID    # set prompt & pad to -100
+        
+        
+        # Pad Instruction Tokens
+        instruction_list = [f["instruction_input_ids"] for f in features]
+        max_instr_len = max(len(t) for t in instruction_list)
+        
+        if max_instr_len == 0: max_instr_len = 1
+        
+        padded_instruction_ids = torch.stack([
+            F.pad(t, (0, max_instr_len - len(t)), value=self.instruction_pad_token_id)
+            for t in instruction_list
+        ])
+        
+        instruction_attention_mask = (padded_instruction_ids != self.instruction_pad_token_id).long()
+                
 
         return {
             "text_tokens": padded_text_tokens, 
@@ -333,6 +389,9 @@ class SpeechDataCollator:
             "t3_cond_emotion_adv": t3_cond_emotion_adv,
             "labels_text": labels_text,       # (B, max_text_len - 1) masked with -100
             "labels_speech": labels_speech,   # (B, max_speech_len - 1) masked with -100
+            
+            "instruction_input_ids": padded_instruction_ids,
+            "instruction_attention_mask": instruction_attention_mask
         }
 # --- Model Wrapper ---
 class T3ForFineTuning(torch.nn.Module):
@@ -368,7 +427,11 @@ class T3ForFineTuning(torch.nn.Module):
                 t3_cond_prompt_speech_tokens,
                 t3_cond_emotion_adv,
                 labels_text = None,
-                labels_speech=None):
+                labels_speech=None,
+                
+                instruction_input_ids = None,
+                instruction_attention_mask = None,
+                ):
 
         current_t3_cond = T3Cond(
                                 speaker_emb=t3_cond_speaker_emb,
@@ -384,7 +447,10 @@ class T3ForFineTuning(torch.nn.Module):
                                 speech_tokens=speech_tokens,
                                 speech_token_lens=speech_token_lens,
                                 labels_text =labels_text,
-                                labels_speech=labels_speech
+                                labels_speech=labels_speech,
+                                
+                                instruction_input_ids=instruction_input_ids,
+                                instruction_attention_mask=instruction_attention_mask
                                 )
         
         total_loss = loss_text + loss_speech
@@ -495,15 +561,25 @@ def main():
             with open(metadata_path, 'r', encoding='utf-8') as f:
                 for line_idx, line in enumerate(f):
                     parts = line.strip().split('|')
-                    if len(parts) != 2: parts = line.strip().split('\t')
-                    if len(parts) == 2:
-                        audio_file, text = parts
+                    if len(parts) < 2: parts = line.strip().split('\t')
+                    
+                    if len(parts) >= 2:
+                        audio_file = parts[0]
+                        text = parts[1]
+                        
+                        instruction = parts[2] if len(parts) > 2 else ""
+                        
                         audio_path = Path(audio_file) if Path(audio_file).is_absolute() else dataset_root / audio_file
                         if audio_path.exists():
-                            all_files.append({"audio": str(audio_path), "text": text})
+                            all_files.append({
+                                "audio": str(audio_path), 
+                                "text": text,
+                                "instruction": instruction 
+                            })
                         else:
                             logger.warning(f"Audio file not found: {audio_path} (line {line_idx+1}). Skipping.")
-                    else: logger.warning(f"Skipping malformed line in metadata (line {line_idx+1}): {line.strip()}")
+                    else: 
+                        logger.warning(f"Skipping malformed line in metadata (line {line_idx+1}): {line.strip()}")
         elif data_args.dataset_dir:
             dataset_path = Path(data_args.dataset_dir)
             for audio_file_path in dataset_path.rglob("*.wav"):
