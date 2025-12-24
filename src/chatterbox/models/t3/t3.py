@@ -18,6 +18,10 @@ from .llama_configs import LLAMA_CONFIGS
 from .inference.t3_hf_backend import T3HuggingfaceBackend
 from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 
+# New import
+from .modeling_llama_adapter import CustomLlamaModel
+from .modules.instruction_encoder import InstructionEncoder
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +52,25 @@ class T3(nn.Module):
         super().__init__()
         self.hp = hp
         self.cfg = LlamaConfig(**LLAMA_CONFIGS[hp.llama_config_name])
-        self.tfmr = LlamaModel(self.cfg)
+        
+        adapter_config = {
+            "instruction_dim": 1024, 
+        }
+        
+        self.tfmr = CustomLlamaModel(self.cfg, adapter_config) # New Custom Model
+        
+        # Init Instruction encoder
+        print("INFO: Initializing Instruction Encoder (flan-t5-large)...")
+        self.instr_encoder = InstructionEncoder(
+                model_name="google/flan-t5-large", 
+                output_dim=adapter_config["instruction_dim"]
+            )
+        
+        # Freeze instruction encoder model
+        self.instr_encoder.eval()
+        for param in self.instr_encoder.parameters():
+            param.requires_grad = False
+        
         self.dim = self.cfg.hidden_size
         self.deepspeed_patch_applied = False
 
@@ -122,6 +144,10 @@ class T3(nn.Module):
         speech_tokens: torch.LongTensor,
         speech_token_lens: torch.LongTensor,
         training=False,
+        
+        # [NEW] instruction
+        instruction_input_ids: Optional[torch.LongTensor] = None,
+        instruction_attention_mask: Optional[torch.Tensor] = None,
     ):
         _ensure_BOT_EOT(text_tokens, self.hp)
 
@@ -131,6 +157,15 @@ class T3(nn.Module):
             text_tokens=text_tokens,
             speech_tokens=speech_tokens,
         )
+        
+        instruction_emb = None
+        if hasattr(self, "instr_encoder") and instruction_input_ids is not None:
+            # Encode: [Batch, Seq] -> [Batch, 1024]
+            instruction_emb = self.instr_encoder(
+                instruction_input_ids, 
+                instruction_attention_mask
+            )
+            # TODO: Classifier-Free Guidance (CFG) => random dropout here
 
         # backbone tranformer forward
         tfmr_out = self.tfmr.forward(
@@ -140,6 +175,7 @@ class T3(nn.Module):
             output_hidden_states=True,
             return_dict=True,
             use_cache=(not training),
+            instruction_emb=instruction_emb # <--- INJECT STYLE
         )
         hidden_states = tfmr_out.hidden_states[-1]  # final tfmr layer output, (B, seq, dim)
 
@@ -218,7 +254,11 @@ class T3(nn.Module):
         speech_tokens: torch.LongTensor,      # (B, S_speech_padded), includes BOS & EOS
         speech_token_lens: torch.LongTensor,  # (B,), actual lengths including BOS & EOS
         labels_text: torch.LongTensor,        # (B, S_text_padded-1), already masked with –100
-        labels_speech: torch.LongTensor       # (B, S_speech_padded-1), already masked with –100
+        labels_speech: torch.LongTensor,      # (B, S_speech_padded-1), already masked with –100
+        
+        # New
+        instruction_input_ids: Optional[torch.LongTensor] = None,
+        instruction_attention_mask: Optional[torch.Tensor] = None,
     ):
         """
         Compute text and speech cross-entropy using pre-masked labels from the collator.
@@ -235,6 +275,8 @@ class T3(nn.Module):
             speech_tokens=speech_tokens,
             speech_token_lens=speech_token_lens,
             training=True,
+            instruction_input_ids=instruction_input_ids,
+            instruction_attention_mask=instruction_attention_mask
         )
         # out.text_logits: (B, S_text_padded, V_text)
         # out.speech_logits: (B, S_speech_padded, V_speech)
@@ -289,6 +331,10 @@ class T3(nn.Module):
         length_penalty=1.0,
         repetition_penalty=2.0,
         cfg_weight=0,
+        
+        # Instruction args for inference
+        instruction_input_ids: Optional[Tensor] = None,
+        instruction_attention_mask: Optional[Tensor] = None,
     ):
         """
         Args:
@@ -310,6 +356,17 @@ class T3(nn.Module):
             speech_tokens=initial_speech_tokens,
             cfg_weight=cfg_weight,
         )
+        
+        instruction_emb = None
+        if hasattr(self, "instr_encoder") and instruction_input_ids is not None:
+            # Move to correct device if needed
+            instruction_input_ids = instruction_input_ids.to(self.device)
+            instruction_attention_mask = instruction_attention_mask.to(self.device)
+            
+            instruction_emb = self.instr_encoder(
+                instruction_input_ids, 
+                instruction_attention_mask
+            )
 
         # In order to use the standard HF generate method, we need to extend some methods to inject our custom logic
         # Note the llama-specific logic. Other tfmr types can be added later.
@@ -384,6 +441,8 @@ class T3(nn.Module):
             output_attentions=True,
             output_hidden_states=True,
             return_dict=True,
+            
+            instruction_emb=instruction_emb
         )
         # Initialize kv_cache with the full context.
         past = output.past_key_values
@@ -434,6 +493,8 @@ class T3(nn.Module):
                 output_attentions=True,
                 output_hidden_states=True,
                 return_dict=True,
+                
+                instruction_emb=instruction_emb
             )
             # Update the kv_cache.
             past = output.past_key_values

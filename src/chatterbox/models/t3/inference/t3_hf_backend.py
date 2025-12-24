@@ -78,6 +78,9 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
         output_attentions=False,
         output_hidden_states=True,
         return_dict=True,
+        
+        instruction_emb: Optional[torch.Tensor] = None,
+        **kwargs
     ):
         """
         This is a method used by huggingface's generate() method.
@@ -99,6 +102,8 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=True,
+            
+            instruction_emb=instruction_emb
         )
         hidden_states = tfmr_out.hidden_states[-1]  # (B, seq, dim)
 
