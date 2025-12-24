@@ -35,3 +35,13 @@ LLAMA_520M_CONFIG_DICT = dict(
 LLAMA_CONFIGS = {
     "Llama_520M": LLAMA_520M_CONFIG_DICT,
 }
+
+ADAPTER_CONFIG = dict(
+    use_adapter=True,
+    instruction_dim=768,  # Embedding dim của embedding model của Instruction Prompt
+    adapter_hidden_dim=1024, # Bằng hidden_size của Llama
+    lora_rank=32,
+    lora_alpha=64,
+    lora_dropout=0.05,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+)
