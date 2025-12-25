@@ -337,3 +337,25 @@ CUDA_VISIBLE_DEVICES=0 uv run src/finetune_t3.py \
     --freeze_s3gen True
 
 ```
+
+
+```
+CUDA_VISIBLE_DEVICES=0 uv run accelerate launch src/finetune_t3.py \
+    --do_train \
+    --output_dir "./chkpt/instruct_tts_v1" \
+    --model_name_or_path "ResembleAI/Chatterbox" \
+    --metadata_file "captts_sft_expresso.txt" \
+    --instruction_column_name "caption" \
+    --learning_rate 1e-5 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 4 \
+    --num_train_epochs 1 \
+    --save_steps 500 \
+    --eval_steps 500 \
+    --logging_steps 10 \
+    --freeze_voice_encoder True \
+    --freeze_s3gen True \
+    --fp16 \
+    --dataloader_num_workers 8 \
+    --save_safetensors False
+```

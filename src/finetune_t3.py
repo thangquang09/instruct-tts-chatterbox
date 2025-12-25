@@ -127,7 +127,7 @@ class SpeechFineTuningDataset(Dataset):
         self.is_hf_format = is_hf_format
 
         self.text_tokenizer = chatterbox_model.tokenizer
-        self.speech_tokenizer: S3Tokenizer = chatterbox_model.s3gen.tokenizer
+        self.speech_tokenizer = chatterbox_model.s3gen.tokenizer
         self.voice_encoder = chatterbox_model.ve
         
         print("Loading T5 Tokenizer for Instructions...")
@@ -647,6 +647,10 @@ def main():
         logger.info("Saving finetuned T3 model weights for ChatterboxTTS...")
         t3_to_save = trainer_instance.model.t3 if hasattr(trainer_instance.model, 't3') else trainer_instance.model.module.t3
         finetuned_t3_state_dict = t3_to_save.state_dict()
+        
+        # Clone tensors to avoid shared memory issue with safetensors
+        # (T5's shared.weight and encoder.embed_tokens.weight are tied)
+        finetuned_t3_state_dict = {k: v.clone().contiguous() for k, v in finetuned_t3_state_dict.items()}
         
         output_t3_safetensor_path = Path(training_args.output_dir) / "t3_cfg.safetensors"
         from safetensors.torch import save_file

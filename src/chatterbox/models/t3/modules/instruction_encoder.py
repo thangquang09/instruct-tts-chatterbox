@@ -8,6 +8,11 @@ class InstructionEncoder(nn.Module):
         print(f"Loading T5 Encoder: {model_name}...")
         self.t5 = T5EncoderModel.from_pretrained(model_name)
         
+        if hasattr(self.t5, "shared") and hasattr(self.t5.encoder, "embed_tokens"):
+             if self.t5.shared.weight.data_ptr() == self.t5.encoder.embed_tokens.weight.data_ptr():
+                print("Info: Cloning T5 shared embeddings to fix Safetensors saving issue.")
+                self.t5.encoder.embed_tokens.weight.data = self.t5.encoder.embed_tokens.weight.data.clone()
+        
         for param in self.t5.parameters():
             param.requires_grad = False
             
