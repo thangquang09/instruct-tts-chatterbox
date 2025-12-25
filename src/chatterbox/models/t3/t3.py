@@ -66,10 +66,9 @@ class T3(nn.Module):
                 output_dim=adapter_config["instruction_dim"]
             )
         
-        # Freeze instruction encoder model
-        self.instr_encoder.eval()
-        for param in self.instr_encoder.parameters():
-            param.requires_grad = False
+        # Note: T5 encoder inside InstructionEncoder is already frozen in its __init__
+        # Only the adapter components (query, attn, proj) should be trainable
+        # Do NOT freeze entire instr_encoder here - let finetune script control it
         
         self.dim = self.cfg.hidden_size
         self.deepspeed_patch_applied = False
@@ -160,12 +159,29 @@ class T3(nn.Module):
         
         instruction_emb = None
         if hasattr(self, "instr_encoder") and instruction_input_ids is not None:
+            # Move to correct device
+            instruction_input_ids = instruction_input_ids.to(self.device)
+            if instruction_attention_mask is not None:
+                instruction_attention_mask = instruction_attention_mask.to(self.device)
+            
             # Encode: [Batch, Seq] -> [Batch, 1024]
             instruction_emb = self.instr_encoder(
                 instruction_input_ids, 
                 instruction_attention_mask
             )
+            
+            # Ensure instruction_emb has same dtype as embeds (for FP16 compatibility)
+            instruction_emb = instruction_emb.to(dtype=embeds.dtype)
+            
+            # Debug: Check for NaN in instruction_emb
+            if training and torch.isnan(instruction_emb).any():
+                logger.warning(f"[T3] NaN detected in instruction_emb! Shape: {instruction_emb.shape}")
+            
             # TODO: Classifier-Free Guidance (CFG) => random dropout here
+        
+        # Debug: Check embeds for NaN
+        if training and torch.isnan(embeds).any():
+            logger.warning(f"[T3] NaN detected in embeds! Shape: {embeds.shape}")
 
         # backbone tranformer forward
         tfmr_out = self.tfmr.forward(
@@ -178,6 +194,10 @@ class T3(nn.Module):
             instruction_emb=instruction_emb # <--- INJECT STYLE
         )
         hidden_states = tfmr_out.hidden_states[-1]  # final tfmr layer output, (B, seq, dim)
+        
+        # Debug: Check hidden_states for NaN
+        if training and torch.isnan(hidden_states).any():
+            logger.warning(f"[T3] NaN detected in hidden_states after tfmr! Shape: {hidden_states.shape}")
 
         # post-processing: splice out text and speech parts of hidden states
         len_text = text_tokens.size(1)
@@ -287,9 +307,18 @@ class T3(nn.Module):
         # Align logits: predict t₁..EOS from inputs [BOS, t₁..]
         logits_for_text = out.text_logits[:, :-1, :].contiguous()  # (B, S_text_padded-1, V_text)
         # labels_text already has shape (B, S_text_padded-1) with –100 where masked
-        if logits_for_text.size(1) == 0:
+        
+        # Check if there are any valid text tokens (not all masked)
+        valid_text_tokens = (labels_text != IGNORE_ID).sum().item()
+        
+        if logits_for_text.size(1) == 0 or valid_text_tokens == 0:
+            # No valid tokens to compute loss - return 0 instead of NaN
             loss_text = torch.tensor(0.0, device=device, requires_grad=self.training)
         else:
+            # Check for NaN in logits before computing loss
+            if torch.isnan(logits_for_text).any() or torch.isinf(logits_for_text).any():
+                logger.warning(f"[T3.loss] NaN/Inf in text_logits! max={logits_for_text.max().item()}, min={logits_for_text.min().item()}")
+            
             loss_text = F.cross_entropy(
                 logits_for_text.transpose(1, 2),  # (B, V_text, S_text_padded-1)
                 labels_text,                      # (B, S_text_padded-1), ignore_index=–100
@@ -299,7 +328,12 @@ class T3(nn.Module):
         # --- Speech Loss (use labels_speech directly) ---
         logits_for_speech = out.speech_logits[:, :-1, :].contiguous()  # (B, S_speech_padded-1, V_speech)
         # labels_speech already has shape (B, S_speech_padded-1) with –100 where masked
-        if logits_for_speech.size(1) == 0:
+        
+        # Check if there are any valid speech tokens (not all masked)
+        valid_speech_tokens = (labels_speech != IGNORE_ID).sum().item()
+        
+        if logits_for_speech.size(1) == 0 or valid_speech_tokens == 0:
+            # No valid tokens to compute loss - return 0 instead of NaN
             loss_speech = torch.tensor(0.0, device=device, requires_grad=self.training)
         else:
             loss_speech = F.cross_entropy(

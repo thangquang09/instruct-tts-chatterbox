@@ -48,6 +48,11 @@ class AdaRMSNormAdapter(nn.Module):
         """
         
         normed_x = original_norm_layer(x) # (x / RMS(x)) * W_old
+        
+        # Handle case when instruction_emb is None (fallback to original norm)
+        if instruction_emb is None:
+            return normed_x
+        
         style_params = self.adapter(instruction_emb) # [Batch, Dim * 2]
         style_params = style_params.unsqueeze(1)
         

@@ -441,6 +441,18 @@ class T3ForFineTuning(torch.nn.Module):
                                 emotion_adv=t3_cond_emotion_adv
                                 ).to(device=self.t3.device)
 
+        # Debug: Check for NaN in inputs before forward pass
+        if not hasattr(self, '_debug_step_count'):
+            self._debug_step_count = 0
+        
+        if self._debug_step_count < 3:
+            logger.info(f"[DEBUG] Step {self._debug_step_count}: Checking inputs...")
+            logger.info(f"[DEBUG] text_tokens: shape={text_tokens.shape}, device={text_tokens.device}, dtype={text_tokens.dtype}")
+            logger.info(f"[DEBUG] speech_tokens: shape={speech_tokens.shape}, device={speech_tokens.device}, dtype={speech_tokens.dtype}")
+            logger.info(f"[DEBUG] t3_cond_speaker_emb: shape={t3_cond_speaker_emb.shape}, has_nan={torch.isnan(t3_cond_speaker_emb).any().item()}")
+            if instruction_input_ids is not None:
+                logger.info(f"[DEBUG] instruction_input_ids: shape={instruction_input_ids.shape}, device={instruction_input_ids.device}")
+        
         loss_text, loss_speech, speech_logits = self.t3.loss(
                                 t3_cond=current_t3_cond,
                                 text_tokens=text_tokens,
@@ -455,6 +467,13 @@ class T3ForFineTuning(torch.nn.Module):
                                 )
         
         total_loss = loss_text + loss_speech
+        
+        # Debug logging (only on first few steps)
+        if self._debug_step_count < 3:
+            logger.info(f"[DEBUG] Step {self._debug_step_count}: loss_text={loss_text.item():.6f}, loss_speech={loss_speech.item():.6f}, total_loss={total_loss.item():.6f}")
+            logger.info(f"[DEBUG] labels_text valid tokens: {(labels_text != -100).sum().item()}, labels_speech valid tokens: {(labels_speech != -100).sum().item()}")
+            logger.info(f"[DEBUG] speech_logits has_nan: {torch.isnan(speech_logits).any().item()}, has_inf: {torch.isinf(speech_logits).any().item()}")
+            self._debug_step_count += 1
 
         return total_loss, speech_logits
 
@@ -519,8 +538,21 @@ def main():
     if model_args.freeze_s3gen:
         for param in chatterbox_model.s3gen.parameters(): param.requires_grad = False
         logger.info("S3Gen model frozen.")
+    
+    # Set T3 model to trainable
     for param in t3_model.parameters(): param.requires_grad = True
     logger.info("T3 model set to trainable.")
+    
+    # Re-freeze T5 encoder inside InstructionEncoder (it's a large pretrained model)
+    if hasattr(t3_model, 'instr_encoder') and hasattr(t3_model.instr_encoder, 't5'):
+        for param in t3_model.instr_encoder.t5.parameters():
+            param.requires_grad = False
+        logger.info("T5 encoder in InstructionEncoder frozen (only adapter components are trainable).")
+    
+    # Log trainable parameters for debugging
+    trainable_params = sum(p.numel() for p in t3_model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in t3_model.parameters())
+    logger.info(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
     logger.info("Loading and processing dataset...")
     raw_datasets = DatasetDict()

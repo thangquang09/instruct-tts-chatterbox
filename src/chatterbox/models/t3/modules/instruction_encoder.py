@@ -19,10 +19,19 @@ class InstructionEncoder(nn.Module):
         self.hidden_size = self.t5.config.d_model
         
         # Shape: [1, 1, Dim] -> Batch dimension sẽ được expand trong forward
-        self.query = nn.Parameter(torch.randn(1, 1, self.hidden_size))
+        # Use scaled initialization for attention query (important for stability)
+        self.query = nn.Parameter(torch.randn(1, 1, self.hidden_size) * 0.02)
         
-        # Multihead Attention
+        # Multihead Attention with proper initialization
         self.attn = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8, batch_first=True)
+        
+        # Initialize attention weights properly (Xavier/Glorot for stability)
+        nn.init.xavier_uniform_(self.attn.in_proj_weight)
+        nn.init.xavier_uniform_(self.attn.out_proj.weight)
+        if self.attn.in_proj_bias is not None:
+            nn.init.zeros_(self.attn.in_proj_bias)
+        if self.attn.out_proj.bias is not None:
+            nn.init.zeros_(self.attn.out_proj.bias)
         
         # Project, ChatterBox dùng 1024
         self.proj = nn.Linear(self.hidden_size, output_dim)
@@ -36,31 +45,45 @@ class InstructionEncoder(nn.Module):
         attention_mask: [Batch, Seq_Len] (1 cho token thật, 0 cho padding)
         """
         
-        with torch.no_grad():
-            outputs = self.t5(input_ids=input_ids, attention_mask=attention_mask)
-            # last_hidden_state: [Batch, Seq_Len, 1024]
-            encoder_hidden_states = outputs.last_hidden_state
+        # CRITICAL: Disable autocast for ENTIRE forward pass to avoid FP16 issues
+        # T5 with FP16 can produce NaN due to numerical instability
+        with torch.amp.autocast('cuda', enabled=False):
+            # Get T5 encoder output (frozen, no gradient, FP32)
+            with torch.no_grad():
+                # Ensure T5 runs in FP32
+                outputs = self.t5(
+                    input_ids=input_ids, 
+                    attention_mask=attention_mask
+                )
+                encoder_hidden_states = outputs.last_hidden_state.detach().float()
             
-        # Attention Pooling
-        batch_size = input_ids.shape[0]
-        # Expand Query cho khớp batch size: [Batch, 1, Dim]
-        query = self.query.expand(batch_size, -1, -1)
-        
-        # Xử lý Mask cho PyTorch MultiheadAttention
-        key_padding_mask = (attention_mask == 0) 
-        
-        # Attn(Q, K, V)
-        # style_emb: [Batch, 1, Dim]
-        style_emb, _ = self.attn(
-            query, 
-            encoder_hidden_states, 
-            encoder_hidden_states, 
-            key_padding_mask=key_padding_mask
-        )
-        
-        # 3. Projection & Output
-        # Squeeze(1) để mất chiều sequence -> [Batch, Output_Dim]
-        style_vector = self.proj(style_emb).squeeze(1) 
+            # Attention Pooling (all in FP32)
+            batch_size = input_ids.shape[0]
+            query = self.query.float().expand(batch_size, -1, -1)
+            
+            # Xử lý Mask cho PyTorch MultiheadAttention
+            key_padding_mask = (attention_mask == 0).to(device=encoder_hidden_states.device)
+            
+            # Check if all tokens are masked (would cause NaN in attention)
+            all_masked = key_padding_mask.all(dim=1)
+            if all_masked.any():
+                # Replace fully masked rows with False to avoid NaN
+                key_padding_mask[all_masked] = False
+            
+            # Attn(Q, K, V) - in FP32
+            style_emb, _ = self.attn(
+                query, 
+                encoder_hidden_states, 
+                encoder_hidden_states, 
+                key_padding_mask=key_padding_mask
+            )
+            
+            # Projection (in FP32)
+            style_vector = torch.nn.functional.linear(
+                style_emb, 
+                self.proj.weight.float(), 
+                self.proj.bias.float() if self.proj.bias is not None else None
+            ).squeeze(1)
         
         return style_vector
 
