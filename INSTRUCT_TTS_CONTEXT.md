@@ -219,7 +219,7 @@ CUDA_VISIBLE_DEVICES=0 uv run accelerate launch src/finetune_t3.py \
     --instruction_column_name "caption" \
     --learning_rate 1e-5 \
     --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 8 \
     --num_train_epochs 1 \
     --save_steps 500 \
     --logging_steps 10 \

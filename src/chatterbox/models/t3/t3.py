@@ -401,6 +401,9 @@ class T3(nn.Module):
                 instruction_input_ids, 
                 instruction_attention_mask
             )
+            
+            # Align dtype with embeddings (important for inference)
+            instruction_emb = instruction_emb.to(dtype=embeds.dtype)
 
         # In order to use the standard HF generate method, we need to extend some methods to inject our custom logic
         # Note the llama-specific logic. Other tfmr types can be added later.

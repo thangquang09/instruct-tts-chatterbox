@@ -268,3 +268,99 @@ class ChatterboxTTS:
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
+    def generate_with_instruction(
+        self,
+        text,
+        instruction,
+        instruction_tokenizer=None,
+        audio_prompt_path=None,
+        exaggeration=0.5,
+        cfg_weight=0.5,
+        temperature=0.8,
+        max_instruction_len=128,
+    ):
+        """
+        Generate speech with style controlled by a text instruction.
+        
+        Args:
+            text: The text content to synthesize
+            instruction: Style instruction (e.g., "Speak happily and excited")
+            instruction_tokenizer: T5 tokenizer for encoding instructions. 
+                                   If None, will auto-load from google/flan-t5-large
+            audio_prompt_path: Optional path to reference audio for voice cloning
+            exaggeration: Emotion exaggeration factor (0.0 - 1.0)
+            cfg_weight: Classifier-free guidance weight
+            temperature: Sampling temperature
+            max_instruction_len: Maximum instruction token length
+        
+        Returns:
+            torch.Tensor: Generated waveform
+        """
+        # Lazy load instruction tokenizer if not provided
+        if instruction_tokenizer is None:
+            if not hasattr(self, '_instruction_tokenizer') or self._instruction_tokenizer is None:
+                from transformers import AutoTokenizer
+                self._instruction_tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
+            instruction_tokenizer = self._instruction_tokenizer
+        
+        if audio_prompt_path:
+            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        else:
+            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+
+        # Update exaggeration if needed
+        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
+            _cond: T3Cond = self.conds.t3
+            self.conds.t3 = T3Cond(
+                speaker_emb=_cond.speaker_emb,
+                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                emotion_adv=exaggeration * torch.ones(1, 1, 1),
+            ).to(device=self.device)
+
+        # Tokenize instruction
+        instruction_inputs = instruction_tokenizer(
+            instruction,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_instruction_len,
+        )
+        instruction_input_ids = instruction_inputs.input_ids.to(self.device)
+        instruction_attention_mask = instruction_inputs.attention_mask.to(self.device)
+
+        # Norm and tokenize text
+        text = punc_norm(text)
+        text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
+
+        if cfg_weight > 0.0:
+            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
+
+        sot = self.t3.hp.start_text_token
+        eot = self.t3.hp.stop_text_token
+        text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+        text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+
+        with torch.inference_mode():
+            speech_tokens = self.t3.inference(
+                t3_cond=self.conds.t3,
+                text_tokens=text_tokens,
+                max_new_tokens=1000,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                instruction_input_ids=instruction_input_ids,
+                instruction_attention_mask=instruction_attention_mask,
+            )
+            # Extract only the conditional batch
+            speech_tokens = speech_tokens[0]
+
+            speech_tokens = drop_invalid_tokens(speech_tokens)
+            speech_tokens = speech_tokens.to(self.device)
+
+            wav, _ = self.s3gen.inference(
+                speech_tokens=speech_tokens,
+                ref_dict=self.conds.gen,
+            )
+            wav = wav.squeeze(0).detach().cpu().numpy()
+            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+        return torch.from_numpy(watermarked_wav).unsqueeze(0)
