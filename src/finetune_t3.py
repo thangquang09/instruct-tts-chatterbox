@@ -1,4 +1,5 @@
 import argparse
+import csv
 import logging
 import os
 import json
@@ -35,7 +36,7 @@ from chatterbox.models.s3gen import S3GEN_SR
 #from chatterbox.utils.t3data_arguments import DataArguments
 #from chatterbox.utils.t3dataset import SpeechFineTuningDataset
 
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 
@@ -559,9 +560,10 @@ def main():
             metadata_path = Path(data_args.metadata_file)
             dataset_root = metadata_path.parent
             with open(metadata_path, 'r', encoding='utf-8') as f:
-                for line_idx, line in enumerate(f):
-                    parts = line.strip().split('|')
-                    if len(parts) < 2: parts = line.strip().split('\t')
+                reader = csv.reader(f, delimiter='|')
+                for line_idx, parts in enumerate(reader):
+                    if not parts: continue
+                    
                     
                     if len(parts) >= 2:
                         audio_file = parts[0]
@@ -634,7 +636,7 @@ def main():
         callbacks=callbacks if callbacks else None
     )
 
-    if training_args.label_names is None: trainer_instance.label_names = ["lables"]
+    if training_args.label_names is None: trainer_instance.label_names = ["labels"]
 
 
     if training_args.do_train:

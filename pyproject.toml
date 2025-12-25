@@ -20,7 +20,11 @@ dependencies = [
     "resemble-perth==1.0.1",
     "omegaconf==2.3.0",
     "conformer==0.3.2",
-    "safetensors==0.5.3"
+    "safetensors==0.5.3",
+    "tensorboard>=2.20.0",
+    "datasets>=4.4.2",
+    "onnx==1.16.1",
+    "accelerate>=1.10.1",
 ]
 
 [project.urls]

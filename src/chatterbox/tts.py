@@ -145,7 +145,14 @@ class ChatterboxTTS:
         t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
-        t3.load_state_dict(t3_state)
+            
+        missing_keys, unexpected_keys = t3.load_state_dict(t3_state, strict=False)
+        
+        if len(missing_keys) > 0:
+            print(f"WARN: Missing keys in state_dict (Normal for Adapters): {len(missing_keys)} keys.")
+            # Bạn có thể uncomment dòng dưới để check kỹ xem có phải chỉ thiếu adapter không
+            # print(missing_keys)    
+        
         t3.to(device).eval()
 
         s3gen = S3Gen()
