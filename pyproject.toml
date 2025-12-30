@@ -25,6 +25,9 @@ dependencies = [
     "datasets>=4.4.2",
     "onnx==1.16.1",
     "accelerate>=1.10.1",
+    "wandb>=0.23.1",
+    "python-dotenv>=1.2.1",
+    "dotenv>=0.9.9",
 ]
 
 [project.urls]

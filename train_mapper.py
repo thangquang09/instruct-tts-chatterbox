@@ -27,6 +27,18 @@ import logging
 from tqdm import tqdm
 from pathlib import Path
 
+# Load environment variables (for WANDB_API_KEY)
+from dotenv import load_dotenv
+load_dotenv()
+
+# WandB for experiment tracking
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Logging disabled.")
+
 # Chatterbox imports
 from chatterbox.models.t3.modules.instruction_encoder import InstructionEncoder
 from chatterbox.models.t3.modules.instruction_mapper import InstructionMapper
@@ -368,7 +380,14 @@ def main():
     parser.add_argument('--num_workers', type=int, default=8, help="DataLoader num_workers")
     parser.add_argument('--compile', action='store_true', help="Use torch.compile for faster training")
     parser.add_argument('--recon_weight', type=float, default=0.5, help="Weight for reconstruction loss")
-    parser.add_argument('--warmup_epochs', type=int, default=30, help="Epochs for Phase 1 (GT recon). After this, switch to Phase 2 (predicted recon).")
+    parser.add_argument('--use_predicted_recon', action='store_true', 
+                        help="Use predicted x_1 for recon loss (Phase 2). Default: use GT x_1 (Phase 1)")
+    parser.add_argument('--resume', type=str, default=None, 
+                        help="Path to checkpoint to resume training from")
+    parser.add_argument('--early_stopping_patience', type=int, default=10, help="Stop training if no improvement for N epochs")
+    parser.add_argument('--wandb_project', type=str, default='instruct-tts-mapper', help="WandB project name")
+    parser.add_argument('--wandb_run_name', type=str, default=None, help="WandB run name (optional)")
+    parser.add_argument('--no_wandb', action='store_true', help="Disable WandB logging")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -419,6 +438,20 @@ def main():
     mapper = InstructionMapper(input_dim=1024, internal_dim=512, spk_emb_dim=256, xvec_dim=192, depth=6).to(device)
     gt_extractor = GroundTruthExtractor(device=device)
     
+    # Resume from checkpoint if specified
+    start_epoch = 1
+    best_cos_from_resume = -1.0
+    if args.resume:
+        logger.info(f"Loading checkpoint from {args.resume}...")
+        checkpoint = torch.load(args.resume, map_location=device)
+        encoder.load_state_dict(checkpoint['encoder'])
+        mapper.load_state_dict(checkpoint['mapper'])
+        if 'best_cos' in checkpoint:
+            best_cos_from_resume = checkpoint['best_cos']
+            logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}, best_cos={best_cos_from_resume:.4f}")
+        else:
+            logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}")
+    
     # Optional: torch.compile for faster training (PyTorch 2.0+)
     if args.compile:
         logger.info("Compiling models with torch.compile...")
@@ -439,40 +472,98 @@ def main():
     logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
     logger.info(f"Starting training for {args.epochs} epochs...")
     logger.info(f"Reconstruction Loss Weight: {args.recon_weight}")
-    logger.info(f"Two-Phase Training: Phase 1 (GT recon) for epochs 1-{args.warmup_epochs}, Phase 2 (Predicted recon) after epoch {args.warmup_epochs}")
     
-    best_cos = -1.0  # Can be negative now
+    # Phase info
+    phase_name = "Phase 2 (Predicted Recon)" if args.use_predicted_recon else "Phase 1 (GT Recon)"
+    logger.info(f"Training Mode: {phase_name}")
+    logger.info(f"Early Stopping Patience: {args.early_stopping_patience} epochs")
+    
+    # Initialize WandB
+    use_wandb = WANDB_AVAILABLE and not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "learning_rate": args.lr,
+                "use_predicted_recon": args.use_predicted_recon,
+                "recon_weight": args.recon_weight,
+                "early_stopping_patience": args.early_stopping_patience,
+                "trainable_params": sum(p.numel() for p in trainable_params),
+                "resumed_from": args.resume,
+            }
+        )
+        logger.info(f"WandB initialized: {wandb.run.name}")
+    else:
+        logger.info("WandB logging disabled.")
+    
+    # Early Stopping state
+    best_cos = best_cos_from_resume  # Use resumed best_cos or -1.0
+    epochs_without_improvement = 0
+    
     for epoch in range(1, args.epochs + 1):
-        # Two-Phase Training: Switch recon mode after warmup
-        use_predicted_recon = (epoch > args.warmup_epochs)
-        phase_name = "Phase 2 (Predicted)" if use_predicted_recon else "Phase 1 (GT)"
-        
         train_loss, flow_loss, recon_loss = train_epoch(
             encoder, mapper, gt_extractor,
             train_loader, optimizer, device, epoch,
             recon_weight=args.recon_weight,
-            use_predicted_recon=use_predicted_recon
+            use_predicted_recon=args.use_predicted_recon
         )
         scheduler.step()
         
         logger.info(f"Epoch {epoch} [{phase_name}]: Total={train_loss:.4f}, Flow={flow_loss:.4f}, Recon={recon_loss:.4f}")
         
+        # WandB logging - Training
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "train/total_loss": train_loss,
+                "train/flow_loss": flow_loss,
+                "train/recon_loss": recon_loss,
+                "train/phase": 2 if args.use_predicted_recon else 1,
+                "learning_rate": scheduler.get_last_lr()[0],
+            })
+        
         # Validation
+        spk_cos, xvec_cos = 0.0, 0.0
         if val_loader is not None:
             spk_cos, xvec_cos = validate(encoder, mapper, gt_extractor, val_loader, device)
             avg_cos = (spk_cos + xvec_cos) / 2
             logger.info(f"Epoch {epoch}: Val SpkCos = {spk_cos:.4f}, XVecCos = {xvec_cos:.4f}")
             
+            # WandB logging - Validation
+            if use_wandb:
+                wandb.log({
+                    "val/spk_cos": spk_cos,
+                    "val/xvec_cos": xvec_cos,
+                    "val/avg_cos": avg_cos,
+                })
+            
+            # Best model saving and early stopping check
             if avg_cos > best_cos:
                 best_cos = avg_cos
+                epochs_without_improvement = 0
                 torch.save({
                     'encoder': encoder.state_dict(),
                     'mapper': mapper.state_dict(),
                     'epoch': epoch,
+                    'best_cos': best_cos,
                 }, os.path.join(args.output_dir, 'best_model.pt'))
                 logger.info(f"Saved best model (cos={avg_cos:.4f})")
+                
+                if use_wandb:
+                    wandb.log({"val/best_cos": best_cos})
+            else:
+                epochs_without_improvement += 1
+                logger.info(f"No improvement for {epochs_without_improvement} epoch(s).")
+            
+            # Early Stopping
+            if epochs_without_improvement >= args.early_stopping_patience:
+                logger.info(f"Early stopping triggered after {epoch} epochs (no improvement for {args.early_stopping_patience} epochs)")
+                break
         
-        # Save checkpoint
+        # Save periodic checkpoint
         if epoch % args.save_every == 0:
             torch.save({
                 'encoder': encoder.state_dict(),
@@ -482,7 +573,11 @@ def main():
             }, os.path.join(args.output_dir, f'checkpoint_epoch{epoch}.pt'))
             logger.info(f"Saved checkpoint at epoch {epoch}")
     
-    logger.info("Training complete!")
+    # Finish WandB run
+    if use_wandb:
+        wandb.finish()
+    
+    logger.info(f"Training complete! Best cos: {best_cos:.4f}")
 
 
 if __name__ == '__main__':
