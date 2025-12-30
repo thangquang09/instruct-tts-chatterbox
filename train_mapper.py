@@ -384,7 +384,10 @@ def main():
                         help="Use predicted x_1 for recon loss (Phase 2). Default: use GT x_1 (Phase 1)")
     parser.add_argument('--resume', type=str, default=None, 
                         help="Path to checkpoint to resume training from")
-    parser.add_argument('--early_stopping_patience', type=int, default=10, help="Stop training if no improvement for N epochs")
+    parser.add_argument("--early_stopping_patience", type=int, default=10, help="Patience for early stopping")
+    parser.add_argument("--reset_best_cos", action="store_true", help="Reset best_cos when resuming (useful for Phase 2)")
+    
+    # WandB argsimprovement for N epochs")
     parser.add_argument('--wandb_project', type=str, default='instruct-tts-mapper', help="WandB project name")
     parser.add_argument('--wandb_run_name', type=str, default=None, help="WandB run name (optional)")
     parser.add_argument('--no_wandb', action='store_true', help="Disable WandB logging")
@@ -446,11 +449,15 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         encoder.load_state_dict(checkpoint['encoder'])
         mapper.load_state_dict(checkpoint['mapper'])
-        if 'best_cos' in checkpoint:
-            best_cos_from_resume = checkpoint['best_cos']
-            logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}, best_cos={best_cos_from_resume:.4f}")
+        
+        if not args.reset_best_cos:
+            if 'best_cos' in checkpoint:
+                best_cos_from_resume = checkpoint['best_cos']
+                logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}, best_cos={best_cos_from_resume:.4f}")
+            else:
+                logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}")
         else:
-            logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}")
+            logger.info(f"Resumed from epoch {checkpoint.get('epoch', '?')}, but RESETTING best_cos to -1.0")
     
     # Optional: torch.compile for faster training (PyTorch 2.0+)
     if args.compile:

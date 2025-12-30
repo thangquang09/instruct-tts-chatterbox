@@ -28,6 +28,7 @@ CUDA_VISIBLE_DEVICES=0 python train_mapper.py \
     --recon_weight 0.5 \
     --use_predicted_recon \
     --resume ./checkpoints/mapper_phase1/best_model.pt \
+    --reset_best_cos \
     --early_stopping_patience 15 \
     --wandb_project instruct-tts-mapper \
     --wandb_run_name "phase2-predicted-recon" \
