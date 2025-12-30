@@ -493,6 +493,75 @@ nvidia-smi --query-gpu=memory.used,memory.free --format=csv -l 1
 
 # Monitor training loss real-time
 tail -f logs/train.log | grep -E "(loss|nan|inf)"
+---
+
+## 🚨 Issue 5: Trainable Target in Flow Matching (Latent Projector Collapse)
+
+> **Severity**: Critical  
+> **Discovered**: December 2025  
+> **Module**: `train_mapper.py` (InstructionMapper Training)
+
+### Triệu chứng
+- **Train Loss giảm đều đẹp** (0.98 → 0.24)
+- **Validation Cosine Similarity dao động quanh 0** hoặc âm (SpkCos ≈ 0, XVecCos ≈ 0.01)
+- Model không học được mapping thực sự
+
+### Root Cause
+Trong training loop, **Target của Flow Matching được tạo từ một module trainable** (`LatentProjector`):
+
+```python
+# ❌ SAI: Target là output của module TRAINABLE
+latent_projector = LatentProjector(...)  # Trainable!
+x_1 = latent_projector(gt_spk_emb, gt_x_vector)  # Moving target!
+
+loss = F.mse_loss(v_pred, x_1 - x_0)  # Target thay đổi mỗi step!
+```
+
+**Hậu quả**: 
+- `LatentProjector` có thể học cách **co cụm (collapse)** mọi embedding về một vùng nhỏ.
+- Flow Matching dễ dàng đạt loss thấp vì target bị "kéo" về gần noise.
+- Thông tin Style/Speaker bị mất hoàn toàn.
+- Khi inference, output không tương quan với GT.
+
+### Fix
+**Target phải là FIXED (không trainable):**
+
+```python
+# ✓ ĐÚNG: Target là concatenation CỐ ĐỊNH của GT embeddings
+def create_fixed_target(spk_emb, x_vector):
+    """
+    x_1 = [SpkEmb (256), XVec (192), ZeroPad (64)] = 512-dim
+    KHÔNG có trainable component!
+    """
+    padding = torch.zeros(batch_size, 64, device=device)
+    x_1 = torch.cat([spk_emb, x_vector, padding], dim=-1)
+    return x_1
+
+# Training:
+x_1 = create_fixed_target(gt_spk_emb, gt_x_vector)  # FIXED!
+loss = F.mse_loss(v_pred, x_1 - x_0)
+```
+
+**Thêm Reconstruction Loss để train output heads:**
+```python
+# ✓ Buộc heads học map từ latent → target embeddings
+pred_spk, pred_xvec = mapper.project_to_targets(x_1)  # Head forward
+recon_loss = F.mse_loss(pred_spk, gt_spk_emb) + F.mse_loss(pred_xvec, gt_x_vector)
+
+total_loss = flow_loss + 0.5 * recon_loss
+```
+
+### Prevention
+1. **Nguyên tắc**: Target trong generative models (Flow Matching, Diffusion, VAE) **PHẢI CỐ ĐỊNH**
+2. Nếu cần biến đổi target, dùng **frozen module** hoặc **hàm deterministic**
+3. Luôn kiểm tra: Các module trong `torch.no_grad()` block **không được có requires_grad=True**
+
+### Checklist
+```
+□ Target được tạo từ GT cố định (pre-trained encoder output, raw features)?
+□ Không có trainable layer nào giữa GT và target?
+□ Output heads có được train qua reconstruction loss?
+□ Validation metric có tương quan với training loss?
 ```
 
 ---
