@@ -286,3 +286,160 @@ Chi tiết: Xem `Troubleshooting_Tips.md`
 ---
 
 *Last Updated: December 2025*
+
+---
+
+## 8. Instruction Mapper (Stage 1 Pre-training)
+
+### 8.1. Tổng quan 2-Stage Training Strategy
+
+Để giảm sự phụ thuộc vào Reference Audio, ta cần train một **Mapper** để ánh xạ từ **Instruction Text** sang **Speaker Embedding** và **X-Vector**.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    2-STAGE TRAINING STRATEGY                              │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  STAGE 1: Train Instruction Mapper (Riêng biệt)                          │
+│  ═══════════════════════════════════════════════                          │
+│                                                                           │
+│  Instruction ──► [T5] ──► [Query+Attn] ──► style_emb ──► [Mapper]        │
+│     Text       FREEZE      TRAIN              │           TRAIN          │
+│                                               │              │           │
+│                                               │         ┌────┴────┐      │
+│                                               │         ▼         ▼      │
+│                                               │     SpkEmb     X-Vec     │
+│                                               │      (256)     (192)     │
+│                                               │         │         │      │
+│                Audio (GT) ──► [VoiceEnc] ────►├─────────┴─────────┤      │
+│                            ──► [CAM++]  ─────►│   Flow Matching   │      │
+│                                               │   Loss (MSE)      │      │
+│                                               └───────────────────┘      │
+│                                                                           │
+│  STAGE 2: Finetune T3 (Sử dụng Mapper đã train)                          │
+│  ══════════════════════════════════════════════                          │
+│                                                                           │
+│  Instruction ──► [T5+Query+Attn] ──► style_emb ──► [proj] ──► T3         │
+│                       FREEZE              │        TRAIN      TRAIN      │
+│                                           ▼                              │
+│                                    [Mapper Heads] (FREEZE)               │
+│                                     → SpkEmb, X-Vec → S3Gen              │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2. InstructionMapper Architecture (Flow Matching)
+
+**File:** `src/chatterbox/models/t3/modules/instruction_mapper.py`
+
+Sử dụng kiến trúc **Conditional Flow Matching** với **AdaLN (Adaptive Layer Normalization)**.
+
+```python
+class InstructionMapper(nn.Module):
+    """
+    Flow Matching Backbone.
+    Input: style_emb (1024) từ InstructionEncoder
+    Output: velocity prediction (512) cho ODE sampling
+    Final: SpkEmb (256), X-Vec (192)
+    """
+    def __init__(self, input_dim=1024, internal_dim=512, 
+                 spk_emb_dim=256, xvec_dim=192, depth=6):
+        # Time embedding (Sinusoidal)
+        self.time_mlp = SinusoidalPosEmb + MLP
+        
+        # Condition projection
+        self.cond_proj = Linear(1024 → 512)
+        
+        # ResNet-MLP với AdaLN blocks
+        self.blocks = [AdaLNBlock(512, 512) for _ in range(6)]
+        
+        # Output heads
+        self.head_spk = Linear(512 → 256)
+        self.head_xvec = Linear(512 → 192)
+    
+    def forward(self, x, t, style_emb):
+        """Train mode: Predict velocity v."""
+        return v_pred  # [B, 512]
+    
+    def inference(self, style_emb, num_steps=10):
+        """Inference mode: ODE sampling → (spk_emb, x_vector)"""
+        return spk_emb, x_vector
+```
+
+### 8.3. InstructionEncoder (Refactored)
+
+**File:** `src/chatterbox/models/t3/modules/instruction_encoder.py`
+
+Đã refactor để loại bỏ projection layer thừa. Chỉ output `style_emb` size 1024.
+
+```python
+def forward(self, input_ids, attention_mask):
+    # ... T5 + Attention Pooling ...
+    style_emb, _ = self.attn(query, encoder_hidden_states, ...)  # [B, 1, 1024]
+    return style_emb.squeeze(1)  # [B, 1024] - Trunk output
+```
+
+### 8.4. Two-Phase Training Scripts (Stage 1)
+
+Training được chia thành 2 script riêng biệt để đảm bảo ổn định tối đa:
+
+**Phase 1: `run_phase1.sh` (GT Reconstruction)**
+- **Mục tiêu:** Train stable heads & backbone projection.
+- **Input Reconstruction:** Dùng Ground Truth `x_1` (concat GT SpkEmb + XVec).
+- **Flag:** Default (không dùng `--use_predicted_recon`).
+- **Early Stopping:** Dựa trên Avg Cosine Similarity.
+
+**Phase 2: `run_phase2.sh` (Predicted Reconstruction)**
+- **Mục tiêu:** End-to-end optimization, giảm gap giữa train/inference.
+- **Input Reconstruction:** Dùng `x_1_pred = x_t + v_pred * (1-t)`.
+- **Resume:** Load checkpoint từ Phase 1.
+- **Flag:** `--use_predicted_recon --reset_best_cos`.
+- **LR:** Thấp hơn (5e-5) để fine-tune.
+
+### 8.5. Training Components & Fixes
+
+| Component | Trainable | Ghi chú |`
+|-----------|-----------|---------|
+| T5 Encoder | ❄️ Frozen | Pretrained knowledge |
+| InstructionEncoder | ✅ Train | Query + Attn (No Proj) |
+| InstructionMapper | ✅ Train | AdaLN blocks, Heads |
+| **Target Construction** | ❄️ **FIXED** | `x_1` = Concat[GT_Spk, GT_XVec, Pad] (No LatentProjector!) |
+
+> ⚠️ **CRITICAL FIX:** Target của Flow Matching phải là **FIXED** (concat GT embeddings). Không dùng trainable projector để tạo target, tránh hiện tượng collapse loss.
+
+### 8.6. Training Results (300k Data - Dec 2025)
+
+Kết quả training Phase 1 trên dataset 300k samples:
+
+| Epoch | Flow Loss | Recon Loss | SpkCos | XVecCos | Avg Cos |
+|-------|-----------|------------|--------|---------|---------|
+| 1 | 0.496 | 0.0005 | **0.237** | **0.111** | 0.174 |
+| 2 | 0.058 | 0.0000 | **0.789** | **0.515** | **0.652** |
+
+**Nhận xét:** Model hội tụ cực nhanh với dữ liệu lớn. SpkCos đạt ~0.79 chỉ sau 2 epochs.
+
+### 8.7. Loading cho Stage 2
+
+Sau khi xong Phase 2, load weights để fine-tune T3:
+
+```python
+# 1. Load Mapper weights
+checkpoint = torch.load("./checkpoints/mapper_phase2/best_model.pt")
+
+# 2. Load InstructionEncoder (Query + Attn)
+model.t3.instr_encoder.load_state_dict(checkpoint['encoder'], strict=False)
+
+# 3. Load InstructionMapper (cho S3Gen inference)
+model.instruction_mapper.load_state_dict(checkpoint['mapper'])
+model.instruction_mapper.eval()  # Freeze mapper in Stage 2
+```
+
+### 8.8. Tensor Shapes
+
+| Tensor | Shape | Mô tả |
+|--------|-------|-------|
+| `style_emb` | [B, 1024] | Trunk output (T5 + Attn Pooling) |
+| `x_1` | [B, 512] | Fixed target = [SpkEmb, XVec, Pad] |
+| `v_pred` | [B, 512] | Predicted velocity |
+| `spk_emb` | [B, 256] | Speaker Embedding (cho T3 T3Cond) |
+| `x_vector` | [B, 192] | CAM++ X-Vector (cho S3Gen) |
