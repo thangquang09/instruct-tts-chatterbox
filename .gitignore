@@ -49,5 +49,5 @@ checkpoints/
 
 .env
 
-
-
+wandb/
+*.log
