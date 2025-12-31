@@ -447,8 +447,24 @@ def main():
     if args.resume:
         logger.info(f"Loading checkpoint from {args.resume}...")
         checkpoint = torch.load(args.resume, map_location=device)
-        encoder.load_state_dict(checkpoint['encoder'])
-        mapper.load_state_dict(checkpoint['mapper'])
+        
+        # Handle torch.compile checkpoints (keys have _orig_mod. prefix)
+        encoder_state = checkpoint['encoder']
+        mapper_state = checkpoint['mapper']
+        
+        # Strip _orig_mod. prefix if present (from torch.compile)
+        def strip_prefix(state_dict, prefix="_orig_mod."):
+            return {k.replace(prefix, ""): v for k, v in state_dict.items()}
+        
+        if any(k.startswith("_orig_mod.") for k in encoder_state.keys()):
+            encoder_state = strip_prefix(encoder_state)
+            logger.info("Stripped _orig_mod. prefix from encoder checkpoint")
+        if any(k.startswith("_orig_mod.") for k in mapper_state.keys()):
+            mapper_state = strip_prefix(mapper_state)
+            logger.info("Stripped _orig_mod. prefix from mapper checkpoint")
+        
+        encoder.load_state_dict(encoder_state)
+        mapper.load_state_dict(mapper_state)
         
         if not args.reset_best_cos:
             if 'best_cos' in checkpoint:
