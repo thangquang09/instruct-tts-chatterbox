@@ -50,4 +50,4 @@ checkpoints/
 .env
 
 wandb/
-*.log
+# *.log

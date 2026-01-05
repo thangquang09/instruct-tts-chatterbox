@@ -61,10 +61,7 @@ class T3(nn.Module):
         
         # Init Instruction encoder
         print("INFO: Initializing Instruction Encoder (flan-t5-large)...")
-        self.instr_encoder = InstructionEncoder(
-                model_name="google/flan-t5-large", 
-                output_dim=adapter_config["instruction_dim"]
-            )
+        self.instr_encoder = InstructionEncoder(model_name="google/flan-t5-large")
         
         # Note: T5 encoder inside InstructionEncoder is already frozen in its __init__
         # Only the adapter components (query, attn, proj) should be trainable
