@@ -660,6 +660,39 @@ class T3ForFineTuning(torch.nn.Module):
         )
 
 
+# --- Custom Trainer for T3 (to ensure eval_loss is properly computed) ---
+class T3Trainer(Trainer):
+    """
+    Custom Trainer that ensures eval_loss is properly computed and returned.
+    """
+    
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Override compute_loss to handle our custom model output.
+        """
+        outputs = model(**inputs)
+        loss = outputs.loss
+        
+        return (loss, outputs) if return_outputs else loss
+    
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """
+        Override prediction_step to properly extract loss during evaluation.
+        This ensures eval_loss is available in metrics.
+        """
+        inputs = self._prepare_inputs(inputs)
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+            loss = outputs.loss
+            
+            if loss is not None:
+                loss = loss.mean().detach()
+        
+        # Return (loss, logits, labels)
+        # For our use case, we mainly care about loss
+        return (loss, None, None)
+
 
 trainer_instance: Optional[Trainer] = None
 
@@ -699,14 +732,26 @@ def main():
         files_to_download = ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json"]
 
         from huggingface_hub import hf_hub_download as hf_download
+        import torch.distributed as dist
+        
+        # ============ DDP: Only rank 0 downloads, others wait ============
+        is_distributed = dist.is_initialized()
+        is_main_process = (not is_distributed) or (dist.get_rank() == 0)
+        
+        if is_main_process:
+            logger.info("[DDP] Rank 0: Downloading model files from HuggingFace...")
+            for f in files_to_download:
+                try: hf_download(repo_id=repo_to_download, filename=f, local_dir=download_dir, local_dir_use_symlinks=False, cache_dir=model_args.cache_dir)
+                except Exception as e: logger.warning(f"Could not download {f} from {repo_to_download}: {e}.")
 
-        for f in files_to_download:
-            try: hf_download(repo_id=repo_to_download, filename=f, local_dir=download_dir, local_dir_use_symlinks=False, cache_dir=model_args.cache_dir)
-            except Exception as e: logger.warning(f"Could not download {f} from {repo_to_download}: {e}.")
-
-        try: hf_download(repo_id=repo_to_download, filename="conds.pt", local_dir=download_dir, local_dir_use_symlinks=False, cache_dir=model_args.cache_dir)
-        except: logger.info("conds.pt not found on Hub or failed to download for this model.")
-
+            try: hf_download(repo_id=repo_to_download, filename="conds.pt", local_dir=download_dir, local_dir_use_symlinks=False, cache_dir=model_args.cache_dir)
+            except: logger.info("conds.pt not found on Hub or failed to download for this model.")
+        
+        # All ranks wait for rank 0 to finish downloading
+        if is_distributed:
+            logger.info(f"[DDP] Rank {dist.get_rank()}: Waiting at barrier for model download...")
+            dist.barrier()
+            logger.info(f"[DDP] Rank {dist.get_rank()}: Barrier passed, loading model...")
 
         chatterbox_model = ChatterboxTTS.from_local(ckpt_dir=download_dir, device="cpu")
         original_model_dir_for_copy = download_dir
@@ -1005,7 +1050,7 @@ def main():
     if training_args.early_stopping_patience is not None and training_args.early_stopping_patience > 0:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=training_args.early_stopping_patience))
 
-    trainer_instance = Trainer(
+    trainer_instance = T3Trainer(
         model=hf_trainable_model,
         args=training_args,
         train_dataset=train_dataset, 
