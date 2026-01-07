@@ -8,7 +8,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from transformers import LlamaModel, LlamaConfig
-from transformers.generation.logits_process import TopPLogitsWarper, RepetitionPenaltyLogitsProcessor
+from transformers.generation.logits_process import (
+    TopPLogitsWarper,
+    RepetitionPenaltyLogitsProcessor,
+)
 
 from .modules.learned_pos_emb import LearnedPositionEmbeddings
 
@@ -20,7 +23,7 @@ from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 
 # New import
 from .modeling_llama_adapter import CustomLlamaModel
-from .modules.instruction_encoder import InstructionEncoder
+from .modules.instruction_encoder import InstructionEncoderT5
 
 
 logger = logging.getLogger(__name__)
@@ -34,8 +37,12 @@ class AttrDict(dict):
 
 def _ensure_BOT_EOT(text_tokens: Tensor, hp):
     B = text_tokens.size(0)
-    assert (text_tokens == hp.start_text_token).int().sum() >= B, "missing start_text_token"
-    assert (text_tokens == hp.stop_text_token).int().sum() >= B, "missing stop_text_token"
+    assert (text_tokens == hp.start_text_token).int().sum() >= B, (
+        "missing start_text_token"
+    )
+    assert (text_tokens == hp.stop_text_token).int().sum() >= B, (
+        "missing stop_text_token"
+    )
 
 
 class T3(nn.Module):
@@ -52,21 +59,21 @@ class T3(nn.Module):
         super().__init__()
         self.hp = hp
         self.cfg = LlamaConfig(**LLAMA_CONFIGS[hp.llama_config_name])
-        
+
         adapter_config = {
-            "instruction_dim": 1024, 
+            "instruction_dim": 1024,
         }
-        
-        self.tfmr = CustomLlamaModel(self.cfg, adapter_config) # New Custom Model
-        
+
+        self.tfmr = CustomLlamaModel(self.cfg, adapter_config)  # New Custom Model
+
         # Init Instruction encoder
         print("INFO: Initializing Instruction Encoder (flan-t5-large)...")
-        self.instr_encoder = InstructionEncoder(model_name="google/flan-t5-large")
-        
+        self.instr_encoder = InstructionEncoderT5(model_name="google/flan-t5-large")
+
         # Note: T5 encoder inside InstructionEncoder is already frozen in its __init__
         # Only the adapter components (query, attn, proj) should be trainable
         # Do NOT freeze entire instr_encoder here - let finetune script control it
-        
+
         self.dim = self.cfg.hidden_size
         self.deepspeed_patch_applied = False
 
@@ -84,8 +91,12 @@ class T3(nn.Module):
             self.speech_pos_emb = LearnedPositionEmbeddings(max_mel_seq_len, self.dim)
 
         # logit projection
-        self.text_head = nn.Linear(self.cfg.hidden_size, hp.text_tokens_dict_size, bias=False)
-        self.speech_head = nn.Linear(self.cfg.hidden_size, hp.speech_tokens_dict_size, bias=False)
+        self.text_head = nn.Linear(
+            self.cfg.hidden_size, hp.text_tokens_dict_size, bias=False
+        )
+        self.speech_head = nn.Linear(
+            self.cfg.hidden_size, hp.speech_tokens_dict_size, bias=False
+        )
         self.compiled = False
 
     @property
@@ -96,9 +107,13 @@ class T3(nn.Module):
         """
         Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
         """
-        if t3_cond.cond_prompt_speech_tokens is not None and t3_cond.cond_prompt_speech_emb is None:
-            t3_cond.cond_prompt_speech_emb = self.speech_emb(t3_cond.cond_prompt_speech_tokens) + \
-                self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
+        if (
+            t3_cond.cond_prompt_speech_tokens is not None
+            and t3_cond.cond_prompt_speech_emb is None
+        ):
+            t3_cond.cond_prompt_speech_emb = self.speech_emb(
+                t3_cond.cond_prompt_speech_tokens
+            ) + self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
         return self.cond_enc(t3_cond)  # (B, len_cond, dim)
 
     def prepare_input_embeds(
@@ -122,13 +137,15 @@ class T3(nn.Module):
         len_cond = cond_emb.size(1)
 
         if cond_emb.size(0) != text_emb.size(0):
-             cond_emb = cond_emb.expand(text_emb.size(0), -1, -1)
+            cond_emb = cond_emb.expand(text_emb.size(0), -1, -1)
 
         # concat
-        embeds = torch.stack([
-            torch.cat((ce, te, se))
-            for ce, te, se in zip(cond_emb, text_emb, speech_emb)
-        ])  # (B, length, dim)
+        embeds = torch.stack(
+            [
+                torch.cat((ce, te, se))
+                for ce, te, se in zip(cond_emb, text_emb, speech_emb)
+            ]
+        )  # (B, length, dim)
         return embeds, len_cond
 
     def forward(
@@ -140,7 +157,6 @@ class T3(nn.Module):
         speech_tokens: torch.LongTensor,
         speech_token_lens: torch.LongTensor,
         training=False,
-        
         # [NEW] instruction
         instruction_input_ids: Optional[torch.LongTensor] = None,
         instruction_attention_mask: Optional[torch.Tensor] = None,
@@ -153,29 +169,30 @@ class T3(nn.Module):
             text_tokens=text_tokens,
             speech_tokens=speech_tokens,
         )
-        
+
         instruction_emb = None
         if hasattr(self, "instr_encoder") and instruction_input_ids is not None:
             # Move to correct device
             instruction_input_ids = instruction_input_ids.to(self.device)
             if instruction_attention_mask is not None:
                 instruction_attention_mask = instruction_attention_mask.to(self.device)
-            
+
             # Encode: [Batch, Seq] -> [Batch, 1024]
             instruction_emb = self.instr_encoder(
-                instruction_input_ids, 
-                instruction_attention_mask
+                instruction_input_ids, instruction_attention_mask
             )
-            
+
             # Ensure instruction_emb has same dtype as embeds (for FP16 compatibility)
             instruction_emb = instruction_emb.to(dtype=embeds.dtype)
-            
+
             # Debug: Check for NaN in instruction_emb
             if training and torch.isnan(instruction_emb).any():
-                logger.warning(f"[T3] NaN detected in instruction_emb! Shape: {instruction_emb.shape}")
-            
+                logger.warning(
+                    f"[T3] NaN detected in instruction_emb! Shape: {instruction_emb.shape}"
+                )
+
             # TODO: Classifier-Free Guidance (CFG) => random dropout here
-        
+
         # Debug: Check embeds for NaN
         if training and torch.isnan(embeds).any():
             logger.warning(f"[T3] NaN detected in embeds! Shape: {embeds.shape}")
@@ -188,13 +205,17 @@ class T3(nn.Module):
             output_hidden_states=True,
             return_dict=True,
             use_cache=(not training),
-            instruction_emb=instruction_emb # <--- INJECT STYLE
+            instruction_emb=instruction_emb,  # <--- INJECT STYLE
         )
-        hidden_states = tfmr_out.hidden_states[-1]  # final tfmr layer output, (B, seq, dim)
-        
+        hidden_states = tfmr_out.hidden_states[
+            -1
+        ]  # final tfmr layer output, (B, seq, dim)
+
         # Debug: Check hidden_states for NaN
         if training and torch.isnan(hidden_states).any():
-            logger.warning(f"[T3] NaN detected in hidden_states after tfmr! Shape: {hidden_states.shape}")
+            logger.warning(
+                f"[T3] NaN detected in hidden_states after tfmr! Shape: {hidden_states.shape}"
+            )
 
         # post-processing: splice out text and speech parts of hidden states
         len_text = text_tokens.size(1)
@@ -208,8 +229,8 @@ class T3(nn.Module):
             text_end = len_cond + ttl[i].item()
             speech_start = len_cond + text_tokens.size(1)
             speech_end = speech_start + stl[i].item()
-            text_latents[i, :ttl[i]] = hidden_states[i, len_cond:text_end]
-            speech_latents[i, :stl[i]] = hidden_states[i, speech_start:speech_end]
+            text_latents[i, : ttl[i]] = hidden_states[i, len_cond:text_end]
+            speech_latents[i, : stl[i]] = hidden_states[i, speech_start:speech_end]
 
         # logit projection
         text_logits = self.text_head(text_latents)
@@ -250,15 +271,23 @@ class T3(nn.Module):
         # Calc CCE losses
         IGNORE_ID = -100
         device = out.text_logits.device
-        mask_text = torch.arange(len_text, device=device)[None] >= text_token_lens[:, None]  # (B, len_text)
-        mask_speech = torch.arange(len_speech, device=device)[None] >= speech_token_lens[:, None]  # (B, len_speech)
+        mask_text = (
+            torch.arange(len_text, device=device)[None] >= text_token_lens[:, None]
+        )  # (B, len_text)
+        mask_speech = (
+            torch.arange(len_speech, device=device)[None] >= speech_token_lens[:, None]
+        )  # (B, len_speech)
         masked_text = text_tokens.masked_fill(mask_text, IGNORE_ID)
         masked_speech = speech_tokens.masked_fill(mask_speech, IGNORE_ID)
 
-        loss_text   = F.cross_entropy(out.text_logits.transpose(1, 2),    masked_text,    ignore_index=IGNORE_ID)
-        loss_speech = F.cross_entropy(out.speech_logits.transpose(1, 2), masked_speech, ignore_index=IGNORE_ID)
-        #loss_text = F.cross_entropy(out.text_logits, masked_text, ignore_index=IGNORE_ID)
-        #loss_speech = F.cross_entropy(out.speech_logits, masked_speech, ignore_index=IGNORE_ID)
+        loss_text = F.cross_entropy(
+            out.text_logits.transpose(1, 2), masked_text, ignore_index=IGNORE_ID
+        )
+        loss_speech = F.cross_entropy(
+            out.speech_logits.transpose(1, 2), masked_speech, ignore_index=IGNORE_ID
+        )
+        # loss_text = F.cross_entropy(out.text_logits, masked_text, ignore_index=IGNORE_ID)
+        # loss_speech = F.cross_entropy(out.speech_logits, masked_speech, ignore_index=IGNORE_ID)
 
         return loss_text, loss_speech
 
@@ -266,13 +295,12 @@ class T3(nn.Module):
         self,
         *,
         t3_cond: T3Cond,
-        text_tokens: torch.LongTensor,        # (B, S_text_padded), includes BOS & EOS
-        text_token_lens: torch.LongTensor,    # (B,), actual lengths including BOS & EOS
-        speech_tokens: torch.LongTensor,      # (B, S_speech_padded), includes BOS & EOS
+        text_tokens: torch.LongTensor,  # (B, S_text_padded), includes BOS & EOS
+        text_token_lens: torch.LongTensor,  # (B,), actual lengths including BOS & EOS
+        speech_tokens: torch.LongTensor,  # (B, S_speech_padded), includes BOS & EOS
         speech_token_lens: torch.LongTensor,  # (B,), actual lengths including BOS & EOS
-        labels_text: torch.LongTensor,        # (B, S_text_padded-1), already masked with –100
-        labels_speech: torch.LongTensor,      # (B, S_speech_padded-1), already masked with –100
-        
+        labels_text: torch.LongTensor,  # (B, S_text_padded-1), already masked with –100
+        labels_speech: torch.LongTensor,  # (B, S_speech_padded-1), already masked with –100
         # New
         instruction_input_ids: Optional[torch.LongTensor] = None,
         instruction_attention_mask: Optional[torch.Tensor] = None,
@@ -293,7 +321,7 @@ class T3(nn.Module):
             speech_token_lens=speech_token_lens,
             training=True,
             instruction_input_ids=instruction_input_ids,
-            instruction_attention_mask=instruction_attention_mask
+            instruction_attention_mask=instruction_attention_mask,
         )
         # out.text_logits: (B, S_text_padded, V_text)
         # out.speech_logits: (B, S_speech_padded, V_speech)
@@ -302,41 +330,47 @@ class T3(nn.Module):
 
         # --- Text Loss (use labels_text directly) ---
         # Align logits: predict t₁..EOS from inputs [BOS, t₁..]
-        logits_for_text = out.text_logits[:, :-1, :].contiguous()  # (B, S_text_padded-1, V_text)
+        logits_for_text = out.text_logits[
+            :, :-1, :
+        ].contiguous()  # (B, S_text_padded-1, V_text)
         # labels_text already has shape (B, S_text_padded-1) with –100 where masked
-        
+
         # Check if there are any valid text tokens (not all masked)
         valid_text_tokens = (labels_text != IGNORE_ID).sum().item()
-        
+
         if logits_for_text.size(1) == 0 or valid_text_tokens == 0:
             # No valid tokens to compute loss - return 0 instead of NaN
             loss_text = torch.tensor(0.0, device=device, requires_grad=self.training)
         else:
             # Check for NaN in logits before computing loss
             if torch.isnan(logits_for_text).any() or torch.isinf(logits_for_text).any():
-                logger.warning(f"[T3.loss] NaN/Inf in text_logits! max={logits_for_text.max().item()}, min={logits_for_text.min().item()}")
-            
+                logger.warning(
+                    f"[T3.loss] NaN/Inf in text_logits! max={logits_for_text.max().item()}, min={logits_for_text.min().item()}"
+                )
+
             loss_text = F.cross_entropy(
                 logits_for_text.transpose(1, 2),  # (B, V_text, S_text_padded-1)
-                labels_text,                      # (B, S_text_padded-1), ignore_index=–100
-                ignore_index=IGNORE_ID
+                labels_text,  # (B, S_text_padded-1), ignore_index=–100
+                ignore_index=IGNORE_ID,
             )
 
         # --- Speech Loss (use labels_speech directly) ---
-        logits_for_speech = out.speech_logits[:, :-1, :].contiguous()  # (B, S_speech_padded-1, V_speech)
+        logits_for_speech = out.speech_logits[
+            :, :-1, :
+        ].contiguous()  # (B, S_speech_padded-1, V_speech)
         # labels_speech already has shape (B, S_speech_padded-1) with –100 where masked
-        
+
         # Check if there are any valid speech tokens (not all masked)
         valid_speech_tokens = (labels_speech != IGNORE_ID).sum().item()
-        
+
         if logits_for_speech.size(1) == 0 or valid_speech_tokens == 0:
             # No valid tokens to compute loss - return 0 instead of NaN
             loss_speech = torch.tensor(0.0, device=device, requires_grad=self.training)
         else:
             loss_speech = F.cross_entropy(
                 logits_for_speech.transpose(1, 2),  # (B, V_speech, S_speech_padded-1)
-                labels_speech,                      # (B, S_speech_padded-1), ignore_index=–100
-                ignore_index=IGNORE_ID
+                labels_speech,  # (B, S_speech_padded-1), ignore_index=–100
+                ignore_index=IGNORE_ID,
             )
 
         return loss_text, loss_speech, out.speech_logits
@@ -347,11 +381,9 @@ class T3(nn.Module):
         *,
         t3_cond: T3Cond,
         text_tokens: Tensor,
-        initial_speech_tokens: Optional[Tensor]=None,
-
+        initial_speech_tokens: Optional[Tensor] = None,
         # misc conditioning
-        prepend_prompt_speech_tokens: Optional[Tensor]=None,
-
+        prepend_prompt_speech_tokens: Optional[Tensor] = None,
         # HF generate args
         num_return_sequences=1,
         max_new_tokens=None,
@@ -362,7 +394,6 @@ class T3(nn.Module):
         length_penalty=1.0,
         repetition_penalty=2.0,
         cfg_weight=0,
-        
         # Instruction args for inference
         instruction_input_ids: Optional[Tensor] = None,
         instruction_attention_mask: Optional[Tensor] = None,
@@ -374,11 +405,15 @@ class T3(nn.Module):
         # Validate / sanitize inputs
         assert prepend_prompt_speech_tokens is None, "not implemented"
         _ensure_BOT_EOT(text_tokens, self.hp)
-        text_tokens = torch.atleast_2d(text_tokens).to(dtype=torch.long, device=self.device)
+        text_tokens = torch.atleast_2d(text_tokens).to(
+            dtype=torch.long, device=self.device
+        )
 
         # Default initial speech to a single start-of-speech token
         if initial_speech_tokens is None:
-            initial_speech_tokens = self.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])
+            initial_speech_tokens = self.hp.start_speech_token * torch.ones_like(
+                text_tokens[:, :1]
+            )
 
         # Prepare custom input embeds
         embeds, len_cond = self.prepare_input_embeds(
@@ -387,18 +422,17 @@ class T3(nn.Module):
             speech_tokens=initial_speech_tokens,
             cfg_weight=cfg_weight,
         )
-        
+
         instruction_emb = None
         if hasattr(self, "instr_encoder") and instruction_input_ids is not None:
             # Move to correct device if needed
             instruction_input_ids = instruction_input_ids.to(self.device)
             instruction_attention_mask = instruction_attention_mask.to(self.device)
-            
+
             instruction_emb = self.instr_encoder(
-                instruction_input_ids, 
-                instruction_attention_mask
+                instruction_input_ids, instruction_attention_mask
             )
-            
+
             # Align dtype with embeddings (important for inference)
             instruction_emb = instruction_emb.to(dtype=embeds.dtype)
 
@@ -414,7 +448,7 @@ class T3(nn.Module):
                 self.tfmr,
                 None,
                 text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
-                alignment_layer_idx=9, # TODO: hparam or something?
+                alignment_layer_idx=9,  # TODO: hparam or something?
                 eos_idx=self.hp.stop_speech_token,
             )
             patched_model = T3HuggingfaceBackend(
@@ -446,7 +480,9 @@ class T3(nn.Module):
 
         device = embeds.device
 
-        bos_token = torch.tensor([[self.hp.start_speech_token]], dtype=torch.long, device=device)
+        bos_token = torch.tensor(
+            [[self.hp.start_speech_token]], dtype=torch.long, device=device
+        )
         bos_embed = self.speech_emb(bos_token)  # shape: (B, 1, embed_dim)
         bos_embed = bos_embed + self.speech_pos_emb.get_fixed_embedding(0)
 
@@ -465,7 +501,9 @@ class T3(nn.Module):
 
         # Instantiate the logits processors.
         top_p_warper = TopPLogitsWarper(top_p=top_p)
-        repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty)
+        repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(
+            penalty=repetition_penalty
+        )
 
         # ---- Initial Forward Pass (no kv_cache yet) ----
         output = self.patched_model(
@@ -475,8 +513,7 @@ class T3(nn.Module):
             output_attentions=True,
             output_hidden_states=True,
             return_dict=True,
-            
-            instruction_emb=instruction_emb
+            instruction_emb=instruction_emb,
         )
         # Initialize kv_cache with the full context.
         past = output.past_key_values
@@ -514,7 +551,9 @@ class T3(nn.Module):
 
             # Get embedding for the new token.
             next_token_embed = self.speech_emb(next_token)
-            next_token_embed = next_token_embed + self.speech_pos_emb.get_fixed_embedding(i + 1)
+            next_token_embed = (
+                next_token_embed + self.speech_pos_emb.get_fixed_embedding(i + 1)
+            )
 
             #  For CFG
             if cfg_weight > 0.0:
@@ -527,8 +566,7 @@ class T3(nn.Module):
                 output_attentions=True,
                 output_hidden_states=True,
                 return_dict=True,
-                
-                instruction_emb=instruction_emb
+                instruction_emb=instruction_emb,
             )
             # Update the kv_cache.
             past = output.past_key_values
