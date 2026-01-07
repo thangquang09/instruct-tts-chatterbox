@@ -260,13 +260,22 @@ def train_epoch(
     mapper_module = mapper_ddp.module if hasattr(mapper_ddp, "module") else mapper_ddp
 
     # Only show progress bar on main process
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}", disable=not is_main_process())
+    pbar = tqdm(
+        dataloader,
+        desc=f"Epoch {epoch}",
+        disable=not is_main_process(),
+        mininterval=30,
+        maxinterval=60,
+    )
     for batch in pbar:
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         gt_spk_emb = batch["gt_spk_emb"].to(device)
         gt_x_vector = batch["gt_x_vector"].to(device)
+	
 
+        # gt_spk_emb = F.normalize(gt_spk_emb, p=2, dim=-1) # chưa cần vì spk_emb đã Norm sẵn rồi.
+        gt_x_vector = F.normalize(gt_x_vector, p=2, dim=-1)
         # Create target latent: [SpkEmb | XVec]
         x_1 = create_fixed_target(gt_spk_emb, gt_x_vector)
 

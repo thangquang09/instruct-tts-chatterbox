@@ -32,7 +32,6 @@ from chatterbox.tts import ChatterboxTTS, Conditionals, punc_norm, REPO_ID
 from chatterbox.models.t3.t3 import T3, T3Cond
 from chatterbox.models.t3.modules.t3_config import T3Config
 
-# TODO:Sửa thành instruction_mapper_slice sau khi train xong.
 from chatterbox.models.t3.modules.instruction_mapper_slice import InstructionMapper
 from chatterbox.models.s3tokenizer import S3_SR, SPEECH_VOCAB_SIZE
 from chatterbox.models.s3gen import S3GEN_SR

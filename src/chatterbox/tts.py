@@ -21,8 +21,8 @@ REPO_ID = "ResembleAI/chatterbox"
 
 def punc_norm(text: str) -> str:
     """
-        Quick cleanup func for punctuation from LLMs or
-        containing chars not seen often in the dataset
+    Quick cleanup func for punctuation from LLMs or
+    containing chars not seen often in the dataset
     """
     if len(text) == 0:
         return "You need to add some text for me to talk."
@@ -44,8 +44,8 @@ def punc_norm(text: str) -> str:
         ("—", "-"),
         ("–", "-"),
         (" ,", ","),
-        ("“", "\""),
-        ("”", "\""),
+        ("“", '"'),
+        ("”", '"'),
         ("‘", "'"),
         ("’", "'"),
     ]
@@ -78,6 +78,7 @@ class Conditionals:
         - prompt_feat_len
         - embedding
     """
+
     t3: T3Cond
     gen: dict
 
@@ -89,10 +90,7 @@ class Conditionals:
         return self
 
     def save(self, fpath: Path):
-        arg_dict = dict(
-            t3=self.t3.__dict__,
-            gen=self.gen
-        )
+        arg_dict = dict(t3=self.t3.__dict__, gen=self.gen)
         torch.save(arg_dict, fpath)
 
     @classmethod
@@ -100,7 +98,7 @@ class Conditionals:
         if isinstance(map_location, str):
             map_location = torch.device(map_location)
         kwargs = torch.load(fpath, map_location=map_location, weights_only=True)
-        return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
+        return cls(T3Cond(**kwargs["t3"]), kwargs["gen"])
 
 
 class ChatterboxTTS:
@@ -126,62 +124,70 @@ class ChatterboxTTS:
         self.watermarker = perth.PerthImplicitWatermarker()
 
     @classmethod
-    def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':
+    def from_local(cls, ckpt_dir, device) -> "ChatterboxTTS":
         ckpt_dir = Path(ckpt_dir)
 
         # Always load to CPU first for non-CUDA devices to handle CUDA-saved models
         if device in ["cpu", "mps"]:
-            map_location = torch.device('cpu')
+            map_location = torch.device("cpu")
         else:
             map_location = None
 
         ve = VoiceEncoder()
-        ve.load_state_dict(
-            load_file(ckpt_dir / "ve.safetensors")
-        )
+        ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors"))
         ve.to(device).eval()
 
         t3 = T3()
         t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
-            
+
         missing_keys, unexpected_keys = t3.load_state_dict(t3_state, strict=False)
-        
+
         if len(missing_keys) > 0:
-            print(f"WARN: Missing keys in state_dict (Normal for Adapters): {len(missing_keys)} keys.")
+            print(
+                f"WARN: Missing keys in state_dict (Normal for Adapters): {len(missing_keys)} keys."
+            )
             # Bạn có thể uncomment dòng dưới để check kỹ xem có phải chỉ thiếu adapter không
-            # print(missing_keys)    
-        
+            # print(missing_keys)
+
         t3.to(device).eval()
 
         s3gen = S3Gen()
-        s3gen.load_state_dict(
-            load_file(ckpt_dir / "s3gen.safetensors"), strict=False
-        )
+        s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
         s3gen.to(device).eval()
 
-        tokenizer = EnTokenizer(
-            str(ckpt_dir / "tokenizer.json")
-        )
+        tokenizer = EnTokenizer(str(ckpt_dir / "tokenizer.json"))
 
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
-            conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
+            conds = Conditionals.load(builtin_voice, map_location=map_location).to(
+                device
+            )
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 
     @classmethod
-    def from_pretrained(cls, device) -> 'ChatterboxTTS':
+    def from_pretrained(cls, device) -> "ChatterboxTTS":
         # Check if MPS is available on macOS
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
-                print("MPS not available because the current PyTorch install was not built with MPS enabled.")
+                print(
+                    "MPS not available because the current PyTorch install was not built with MPS enabled."
+                )
             else:
-                print("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
+                print(
+                    "MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine."
+                )
             device = "cpu"
 
-        for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
+        for fpath in [
+            "ve.safetensors",
+            "t3_cfg.safetensors",
+            "s3gen.safetensors",
+            "tokenizer.json",
+            "conds.pt",
+        ]:
             local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
 
         return cls.from_local(Path(local_path).parent, device)
@@ -192,17 +198,25 @@ class ChatterboxTTS:
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
 
-        s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
-        s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        s3gen_ref_wav = s3gen_ref_wav[: self.DEC_COND_LEN]
+        s3gen_ref_dict = self.s3gen.embed_ref(
+            s3gen_ref_wav, S3GEN_SR, device=self.device
+        )
 
         # Speech cond prompt tokens
         if plen := self.t3.hp.speech_cond_prompt_len:
             s3_tokzr = self.s3gen.tokenizer
-            t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
-            t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+            t3_cond_prompt_tokens, _ = s3_tokzr.forward(
+                [ref_16k_wav[: self.ENC_COND_LEN]], max_len=plen
+            )
+            t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(
+                self.device
+            )
 
         # Voice-encoder speaker embedding
-        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+        ve_embed = torch.from_numpy(
+            self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR)
+        )
         ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
 
         t3_cond = T3Cond(
@@ -223,7 +237,9 @@ class ChatterboxTTS:
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
-            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+            assert self.conds is not None, (
+                "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+            )
 
         # Update exaggeration if needed
         if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
@@ -239,7 +255,9 @@ class ChatterboxTTS:
         text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
 
         if cfg_weight > 0.0:
-            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+            text_tokens = torch.cat(
+                [text_tokens, text_tokens], dim=0
+            )  # Need two seqs for CFG
 
         sot = self.t3.hp.start_text_token
         eot = self.t3.hp.stop_text_token
@@ -282,32 +300,40 @@ class ChatterboxTTS:
     ):
         """
         Generate speech with style controlled by a text instruction.
-        
+
         Args:
             text: The text content to synthesize
             instruction: Style instruction (e.g., "Speak happily and excited")
-            instruction_tokenizer: T5 tokenizer for encoding instructions. 
+            instruction_tokenizer: T5 tokenizer for encoding instructions.
                                    If None, will auto-load from google/flan-t5-large
             audio_prompt_path: Optional path to reference audio for voice cloning
             exaggeration: Emotion exaggeration factor (0.0 - 1.0)
             cfg_weight: Classifier-free guidance weight
             temperature: Sampling temperature
             max_instruction_len: Maximum instruction token length
-        
+
         Returns:
             torch.Tensor: Generated waveform
         """
         # Lazy load instruction tokenizer if not provided
         if instruction_tokenizer is None:
-            if not hasattr(self, '_instruction_tokenizer') or self._instruction_tokenizer is None:
+            if (
+                not hasattr(self, "_instruction_tokenizer")
+                or self._instruction_tokenizer is None
+            ):
                 from transformers import AutoTokenizer
-                self._instruction_tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
+
+                self._instruction_tokenizer = AutoTokenizer.from_pretrained(
+                    "google/flan-t5-large"
+                )
             instruction_tokenizer = self._instruction_tokenizer
-        
+
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
-            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+            assert self.conds is not None, (
+                "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+            )
 
         # Update exaggeration if needed
         if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
@@ -369,13 +395,13 @@ class ChatterboxTTS:
 class InstructionChatterBox:
     """
     Instruction-only TTS: Generate speech from text instructions without reference audio.
-    
+
     Uses:
     - InstructionMapper to predict speaker_emb (for T3) and x_vector (for S3Gen)
     - T3 (finetuned) for text-to-token generation
     - S3Gen with zero prompts for token-to-waveform generation
     """
-    
+
     def __init__(
         self,
         t3: T3,
@@ -393,17 +419,17 @@ class InstructionChatterBox:
         self.instruction_tokenizer = instruction_tokenizer
         self.device = device
         self.watermarker = perth.PerthImplicitWatermarker()
-    
+
     @classmethod
     def from_local(
-        cls, 
-        t3_ckpt_dir,       # Dir containing t3_cfg.safetensors, s3gen.safetensors, tokenizer.json
-        mapper_ckpt_path,   # Path to mapper checkpoint (.pt)
-        device
-    ) -> 'InstructionChatterBox':
+        cls,
+        t3_ckpt_dir,  # Dir containing t3_cfg.safetensors, s3gen.safetensors, tokenizer.json
+        mapper_ckpt_path,  # Path to mapper checkpoint (.pt)
+        device,
+    ) -> "InstructionChatterBox":
         """
         Load InstructionChatterBox from local checkpoints.
-        
+
         Args:
             t3_ckpt_dir: Directory containing finetuned T3 weights and other model files
             mapper_ckpt_path: Path to InstructionMapper checkpoint (best_model.pt)
@@ -411,10 +437,10 @@ class InstructionChatterBox:
         """
         from transformers import AutoTokenizer
         from .models.t3.modules.instruction_mapper_slice import InstructionMapper
-        
+
         t3_ckpt_dir = Path(t3_ckpt_dir)
         mapper_ckpt_path = Path(mapper_ckpt_path)
-        
+
         # Load T3 (finetuned)
         print(f"Loading T3 from {t3_ckpt_dir}...")
         t3 = T3()
@@ -423,23 +449,25 @@ class InstructionChatterBox:
         if len(missing_keys) > 0:
             print(f"  -> Missing keys (adapter/encoder): {len(missing_keys)}")
         t3.to(device).eval()
-        
+
         # Load InstructionMapper
         print(f"Loading InstructionMapper from {mapper_ckpt_path}...")
         mapper_ckpt = torch.load(mapper_ckpt_path, map_location="cpu")
-        
+
         # Load mapper
         mapper = InstructionMapper()
         mapper.load_state_dict(mapper_ckpt["mapper"])
         mapper.to(device).eval()
-        
+
         # Load InstructionEncoder weights into T3
-        if "encoder" in mapper_ckpt and hasattr(t3, 'instr_encoder'):
+        if "encoder" in mapper_ckpt and hasattr(t3, "instr_encoder"):
             missing, unexpected = t3.instr_encoder.load_state_dict(
                 mapper_ckpt["encoder"], strict=False
             )
-            print(f"  -> Loaded InstructionEncoder weights ({len(mapper_ckpt['encoder'])} keys)")
-        
+            print(
+                f"  -> Loaded InstructionEncoder weights ({len(mapper_ckpt['encoder'])} keys)"
+            )
+
         # Load S3Gen
         print(f"Loading S3Gen from {t3_ckpt_dir}...")
         s3gen = S3Gen()
@@ -447,17 +475,17 @@ class InstructionChatterBox:
             load_file(t3_ckpt_dir / "s3gen.safetensors"), strict=False
         )
         s3gen.to(device).eval()
-        
+
         # Load text tokenizer
         tokenizer = EnTokenizer(str(t3_ckpt_dir / "tokenizer.json"))
-        
+
         # Load instruction tokenizer (T5)
         print("Loading T5 tokenizer...")
         instruction_tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
-        
+
         print("InstructionChatterBox loaded successfully!")
         return cls(t3, s3gen, tokenizer, mapper, instruction_tokenizer, device)
-    
+
     @torch.inference_mode()
     def generate(
         self,
@@ -470,7 +498,7 @@ class InstructionChatterBox:
     ) -> torch.Tensor:
         """
         Generate speech from text and instruction only (no reference audio).
-        
+
         Args:
             text: Text content to synthesize
             instruction: Style instruction (e.g., "Speak happily and excited")
@@ -478,7 +506,7 @@ class InstructionChatterBox:
             cfg_weight: Classifier-free guidance weight
             temperature: Sampling temperature
             max_instruction_len: Maximum instruction token length
-        
+
         Returns:
             torch.Tensor: Generated waveform
         """
@@ -492,32 +520,37 @@ class InstructionChatterBox:
         )
         instruction_ids = instruction_inputs.input_ids.to(self.device)
         attention_mask = instruction_inputs.attention_mask.to(self.device)
-        
+
         # 2. Get style embedding from InstructionEncoder
         style_emb = self.t3.instr_encoder(instruction_ids, attention_mask)
-        
+
         # 3. Predict speaker_emb [256] and x_vector [192] from Mapper
         spk_emb, x_vector = self.mapper.inference(style_emb)
-        
+
         # 4. Build T3 conditioning (with zeros for prompt tokens)
         t3_cond = T3Cond(
             speaker_emb=spk_emb,
-            cond_prompt_speech_tokens=torch.zeros(1, self.t3.hp.speech_cond_prompt_len, dtype=torch.long, device=self.device),
+            cond_prompt_speech_tokens=torch.zeros(
+                1,
+                self.t3.hp.speech_cond_prompt_len,
+                dtype=torch.long,
+                device=self.device,
+            ),
             emotion_adv=exaggeration * torch.ones(1, 1, 1, device=self.device),
         ).to(device=self.device)
-        
+
         # 5. Tokenize text
         text = punc_norm(text)
         text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
-        
+
         if cfg_weight > 0.0:
             text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
-        
+
         sot = self.t3.hp.start_text_token
         eot = self.t3.hp.stop_text_token
         text_tokens = F.pad(text_tokens, (1, 0), value=sot)
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
-        
+
         # 6. Generate speech tokens via T3
         speech_tokens = self.t3.inference(
             t3_cond=t3_cond,
@@ -531,7 +564,7 @@ class InstructionChatterBox:
         speech_tokens = speech_tokens[0]  # Extract conditional batch
         speech_tokens = drop_invalid_tokens(speech_tokens)
         speech_tokens = speech_tokens.to(self.device)
-        
+
         # 7. Build S3Gen ref_dict with predicted x_vector and ZEROS for prompts
         ref_dict = {
             "prompt_token": torch.zeros(1, 1, dtype=torch.long, device=self.device),
@@ -540,7 +573,7 @@ class InstructionChatterBox:
             "prompt_feat_len": None,
             "embedding": x_vector,
         }
-        
+
         # 8. Generate waveform via S3Gen
         wav, _ = self.s3gen.inference(
             speech_tokens=speech_tokens,
@@ -548,5 +581,5 @@ class InstructionChatterBox:
         )
         wav = wav.squeeze(0).detach().cpu().numpy()
         watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-        
+
         return torch.from_numpy(watermarked_wav).unsqueeze(0)

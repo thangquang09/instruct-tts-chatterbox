@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+# X_VECTOR_MEAN = 14.1
+
 
 class SinusoidalPosEmb(nn.Module):
     """
@@ -96,7 +98,9 @@ class InstructionMapper(nn.Module):
         )  # Chiếu noise x_t về hidden
 
         self.blocks = nn.ModuleList(
-            [AdaLNBlock(internal_dim, internal_dim) for _ in range(depth)]
+            [
+                AdaLNBlock(internal_dim, internal_dim * 2) for _ in range(depth)
+            ]  # *2 là do concat time_emb và style_emb
         )
 
         self.final_norm = nn.LayerNorm(internal_dim)
@@ -112,6 +116,14 @@ class InstructionMapper(nn.Module):
         nn.init.zeros_(self.output_proj.weight)
         nn.init.zeros_(self.output_proj.bias)
 
+    def create_fixed_target(self, spk_emb, x_vector):
+        """
+        Create FIXED target for Flow Matching by concatenating GT embeddings.
+        x_1 = [SpkEmb (256), XVec (192)] = 448-dim
+        """
+        x_1 = torch.cat([spk_emb, x_vector], dim=-1)
+        return x_1
+
     def forward(self, x, t, style_emb):
         """
         x: [Batch, 448] - Noisy Vector ở bước t
@@ -126,7 +138,8 @@ class InstructionMapper(nn.Module):
         c_emb = self.cond_proj(style_emb)  # [B, 448]
 
         # Cộng gộp Time và Text Condition
-        global_cond = t_emb + c_emb  # [B, 448]
+        # global_cond = t_emb + c_emb  # [B, 448]
+        global_cond = torch.cat([t_emb, c_emb], dim=1)  # [B, 896]
 
         # 2. Backbone Processing
         h = self.input_proj(x)
@@ -148,6 +161,12 @@ class InstructionMapper(nn.Module):
         # Direct slicing
         spk_emb = latent_z[:, : self.spk_emb_dim]
         x_vector = latent_z[:, self.spk_emb_dim : self.spk_emb_dim + self.xvec_dim]
+
+        # Norm
+        spk_emb = F.normalize(spk_emb, p=2, dim=-1)
+
+        x_vector = F.normalize(x_vector, p=2, dim=-1)
+
         return spk_emb, x_vector
 
     @torch.no_grad()

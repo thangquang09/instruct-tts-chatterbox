@@ -28,6 +28,7 @@ dependencies = [
     "wandb>=0.23.1",
     "python-dotenv>=1.2.1",
     "dotenv>=0.9.9",
+    "pytest>=8.4.2",
 ]
 
 [project.urls]

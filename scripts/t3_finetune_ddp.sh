@@ -27,15 +27,15 @@ fi
 # =================== Configuration ===================
 
 # Data paths
-TRAIN_MANIFEST="/data1/speech/nhandt23/06_thang/instruct-tts-chatterbox/final_data.txt"
-VAL_MANIFEST="/data1/speech/nhandt23/06_thang/instruct-tts-chatterbox/final_data_val.txt"
+TRAIN_MANIFEST="data/final_data.txt"
+VAL_MANIFEST="data/final_data_val.txt"
 
 # Model paths
 MODEL_NAME="ResembleAI/chatterbox"
-MAPPER_CKPT="/data1/speech/nhandt23/06_thang/instruct-tts-chatterbox/checkpoints/mapper_slice_v2/best_model.pt"
+MAPPER_CKPT="checkpoints/mapper_slice_v4/best_model.pt"
 
 # Output
-OUTPUT_DIR="./checkpoints/t3_instruct_ddp"
+OUTPUT_DIR="./checkpoints/t3_instruct_ddp_v2"
 
 # =================== DDP Configuration ===================
 NUM_GPUS=3
