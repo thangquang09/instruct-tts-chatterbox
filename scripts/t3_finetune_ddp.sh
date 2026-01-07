@@ -125,6 +125,11 @@ echo ""
 echo "Starting DDP training on $NUM_GPUS GPUs..."
 echo "=============================================="
 
+# WandB settings
+WANDB_PROJECT="instruct-tts-t3"
+WANDB_RUN_NAME="t3-finetune-ddp-v1"
+export WANDB_PROJECT
+
 # =================== Launch DDP Training ===================
 
 CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun \
@@ -159,7 +164,8 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun \
     --max_steps $MAX_STEPS \
     --remove_unused_columns false \
     --save_safetensors false \
-    --report_to tensorboard \
+    --report_to wandb \
+    --run_name "$WANDB_RUN_NAME" \
     --bf16 \
     --tf32 True \
     --use_cache $USE_CACHE \
