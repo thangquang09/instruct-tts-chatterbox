@@ -29,6 +29,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "dotenv>=0.9.9",
     "pytest>=8.4.2",
+    "peft>=0.17.1",
 ]
 
 [project.urls]

@@ -21,50 +21,52 @@ from transformers.utils import (
 
 logger = logging.get_logger(__name__)
 
+
 class AdaRMSNormAdapter(nn.Module):
     def __init__(self, hidden_size: int, instruction_dim: int):
         super().__init__()
-        
+
         self.adapter = nn.Sequential(
             nn.Linear(instruction_dim, hidden_size),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size * 2) # cho gamma vs beta
+            nn.Linear(hidden_size, hidden_size * 2),  # cho gamma vs beta
         )
-        
+
         # Zero Initialization (zeros init last layer)
         nn.init.zeros_(self.adapter[-1].weight)
         nn.init.zeros_(self.adapter[-1].bias)
-        
+
     def forward(
-        self, 
+        self,
         x: torch.Tensor,
         instruction_emb: torch.Tensor,
-        original_norm_layer: nn.Module 
+        original_norm_layer: nn.Module,
     ):
         """
         x: Hidden states [Batch, Seq, Dim],
         instruction_emb: Instruction Vector [Batch, Instr_Dim],
         original_norm_layer: Backbone's freezed norm layer
         """
-        
-        normed_x = original_norm_layer(x) # (x / RMS(x)) * W_old
-        
+
+        normed_x = original_norm_layer(x)  # (x / RMS(x)) * W_old
+
         # Handle case when instruction_emb is None (fallback to original norm)
         if instruction_emb is None:
             return normed_x
-        
-        style_params = self.adapter(instruction_emb) # [Batch, Dim * 2]
+
+        style_params = self.adapter(instruction_emb)  # [Batch, Dim * 2]
         style_params = style_params.unsqueeze(1)
-        
+
         gamma_ada, beta_ada = style_params.chunk(2, dim=-1)
-        
+
         output = normed_x * (1 + gamma_ada) + beta_ada
         return output
+
 
 class CustomLlamaDecoderLayer(HFLlamaDecoderLayer):
     def __init__(self, config: LlamaConfig, layer_idx: int, adapter_config: dict):
         super().__init__(config, layer_idx)
-        
+
         instr_dim = adapter_config.get("instruction_dim", 1024)
         self.input_adapter = AdaRMSNormAdapter(config.hidden_size, instr_dim)
         self.post_attention_adapter = AdaRMSNormAdapter(config.hidden_size, instr_dim)
@@ -79,14 +81,17 @@ class CustomLlamaDecoderLayer(HFLlamaDecoderLayer):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        instruction_emb: torch.Tensor = None, # <--- [NEW INPUT]
+        instruction_emb: torch.Tensor = None,  # <--- [NEW INPUT]
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         residual = hidden_states
 
         # Thay input_layernorm bằng input_adapter ---
-        hidden_states = self.input_adapter(hidden_states, instruction_emb, self.input_layernorm)
+        hidden_states = self.input_adapter(
+            hidden_states, instruction_emb, self.input_layernorm
+        )
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -104,10 +109,12 @@ class CustomLlamaDecoderLayer(HFLlamaDecoderLayer):
 
         # Fully Connected
         residual = hidden_states
-        
+
         # Thay post_attention_layernorm bằng post_attention_adapter ---
-        hidden_states = self.post_attention_adapter(hidden_states, instruction_emb, self.post_attention_layernorm)
-        
+        hidden_states = self.post_attention_adapter(
+            hidden_states, instruction_emb, self.post_attention_layernorm
+        )
+
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -120,29 +127,40 @@ class CustomLlamaDecoderLayer(HFLlamaDecoderLayer):
             outputs += (present_key_value,)
 
         return outputs
-    
-    
+
+
 class CustomLlamaModel(HFLlamaModel):
     def __init__(self, config: LlamaConfig, adapter_config: dict):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+
         self.layers = nn.ModuleList(
             [
-                CustomLlamaDecoderLayer(config, layer_idx, adapter_config) 
+                CustomLlamaDecoderLayer(config, layer_idx, adapter_config)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
-        
+
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         # Initialize weights
         self.post_init()
+
+        # Re-zero initialize adapters (post_init overwrites them with random weights!)
+        for layer in self.layers:
+            # Input Adapter
+            nn.init.zeros_(layer.input_adapter.adapter[-1].weight)
+            nn.init.zeros_(layer.input_adapter.adapter[-1].bias)
+            # Post-Attention Adapter
+            nn.init.zeros_(layer.post_attention_adapter.adapter[-1].weight)
+            nn.init.zeros_(layer.post_attention_adapter.adapter[-1].bias)
 
     def forward(
         self,
@@ -156,18 +174,27 @@ class CustomLlamaModel(HFLlamaModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        instruction_emb: Optional[torch.Tensor] = None, # <--- [NEW INPUT]
+        instruction_emb: Optional[torch.Tensor] = None,  # <--- [NEW INPUT]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
 
         if self.gradient_checkpointing and self.training and use_cache:
             logger.warning_once(
@@ -190,17 +217,25 @@ class CustomLlamaModel(HFLlamaModel):
                 )
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
             cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
         )
-        
+
         hidden_states = inputs_embeds
 
         # Rotary Pos Emb
@@ -228,7 +263,7 @@ class CustomLlamaModel(HFLlamaModel):
                     use_cache,
                     cache_position,
                     position_embeddings,
-                    instruction_emb, # <--- [PASS]
+                    instruction_emb,  # <--- [PASS]
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -240,7 +275,7 @@ class CustomLlamaModel(HFLlamaModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
-                    instruction_emb=instruction_emb, # <--- [PASS]
+                    instruction_emb=instruction_emb,  # <--- [PASS]
                 )
 
             hidden_states = layer_outputs[0]
@@ -261,8 +296,12 @@ class CustomLlamaModel(HFLlamaModel):
             next_cache = next_cache.to_legacy_cache()
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-            
+            return tuple(
+                v
+                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                if v is not None
+            )
+
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
