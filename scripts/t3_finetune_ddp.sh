@@ -18,11 +18,20 @@ set -e
 
 MOCK_MODE=false
 MAX_STEPS=-1
+FREEZE_T3=true
 
-if [[ "$1" == "--mock" ]]; then
-    MOCK_MODE=true
-    MAX_STEPS=10
-fi
+# Parse command line arguments
+for arg in "$@"; do
+    case $arg in
+        --mock)
+            MOCK_MODE=true
+            MAX_STEPS=10
+            ;;
+        --freeze_t3)
+            FREEZE_T3=true
+            ;;
+    esac
+done
 
 # =================== Configuration ===================
 
@@ -32,25 +41,25 @@ VAL_MANIFEST="data/final_data_val.txt"
 
 # Model paths
 MODEL_NAME="ResembleAI/chatterbox"
-MAPPER_CKPT="checkpoints/mapper_slice_v4/best_model.pt"
+MAPPER_CKPT="checkpoints/mapper_flow/best_model.pt"
 
 # Output
-OUTPUT_DIR="./checkpoints/t3_instruct_ddp_v2"
+OUTPUT_DIR="./checkpoints/t3_instruct_ddp"
 
 # =================== DDP Configuration ===================
-NUM_GPUS=3
-GPU_IDS="1,2,3"           # Change based on available GPUs
+NUM_GPUS=4
+GPU_IDS="0,1,2,3"           # Change based on available GPUs
 MASTER_PORT=29500         # Must be unique if other DDP jobs running
 
 # Training settings (Per-GPU batch size)
 NUM_EPOCHS=5
-BATCH_SIZE=6             
+BATCH_SIZE=8             
 LEARNING_RATE=1e-4
 WARMUP_RATIO=0.1
 GRAD_ACCUM=2          
 MAX_GRAD_NORM=1.0
 
-# Mixed Precision (A100 supports bf16 natively)
+# Mixed Precision (A100)
 USE_BF16=true
 USE_TF32=true
 
@@ -96,6 +105,12 @@ else
     echo "Max Steps: Unlimited (Based on $NUM_EPOCHS Epochs)"
 fi
 
+if [ "$FREEZE_T3" = true ]; then
+    echo "T3 Backbone: FROZEN (adapter-only training)"
+else
+    echo "T3 Backbone: TRAINABLE (full T3 finetuning)"
+fi
+
 # Check required files exist
 if [ ! -f "$TRAIN_MANIFEST" ]; then
     echo "ERROR: Training manifest not found: $TRAIN_MANIFEST"
@@ -127,7 +142,7 @@ echo "=============================================="
 
 # WandB settings
 WANDB_PROJECT="instruct-tts-t3"
-WANDB_RUN_NAME="t3-finetune-ddp-v1"
+WANDB_RUN_NAME="t3-finetune-ddp-v3-freeze-t3"
 export WANDB_PROJECT
 
 # =================== Launch DDP Training ===================
@@ -171,7 +186,8 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun \
     --use_cache $USE_CACHE \
     --train_cache_dir $TRAIN_CACHE_DIR \
     --eval_cache_dir $VAL_CACHE_DIR \
-    --ddp_find_unused_parameters true
+    --ddp_find_unused_parameters true \
+    $([ "$FREEZE_T3" = true ] && echo "--freeze_t3")
 
 echo ""
 echo "=============================================="

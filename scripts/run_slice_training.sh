@@ -5,7 +5,7 @@ set -e
 
 TRAIN_CACHE_DIR="./cache/t3_train"
 VAL_CACHE_DIR="./cache/t3_val"
-OUTPUT_DIR="./checkpoints/mapper_slice_v4"
+OUTPUT_DIR="./checkpoints/mapper_flow"
 SCRIPT_DIR="train_mapper_slice.py"
 
 # Training settings
@@ -17,8 +17,8 @@ LR="1e-4"
 PATIENCE=15
 
 # Number of GPUs
-NUM_GPUS=3
-GPU_IDS="1,2,3"
+NUM_GPUS=4
+GPU_IDS="0,1,2,3"
 
 # WandB settings
 WANDB_PROJECT="instruct-tts-mapper"
