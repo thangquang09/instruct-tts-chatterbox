@@ -798,13 +798,14 @@ class T3ForFineTuning(torch.nn.Module):
             if use_instruction.any():
                 instr_indices = use_instruction.nonzero(as_tuple=True)[0]
 
-                # Get style_emb via InstructionEncoder (frozen)
+                # Get style_emb via InstructionEncoder (frozen, use mapper's query/attn)
                 with torch.no_grad():
                     style_emb = self.t3.instr_encoder(
                         instruction_input_ids[instr_indices].to(device),
                         instruction_attention_mask[instr_indices].to(device)
                         if instruction_attention_mask is not None
                         else None,
+                        use_for="mapper",
                     )
                     # Mapper inference -> predict SpkEmb
                     pred_spk, _ = self.mapper.inference(style_emb)
@@ -1071,6 +1072,25 @@ def main():
                     f"  -> [VERIFY] InstructionEncoder.attn.out_proj L2 norm: {attn_out_norm:.4f}"
                 )
 
+            # ============ Copy mapper weights to T3's style adapters ============
+            # Initialize style_query/style_attn from trained mapper's query/attn
+            if hasattr(t3_model.instr_encoder, "style_query") and hasattr(
+                t3_model.instr_encoder, "query"
+            ):
+                with torch.no_grad():
+                    t3_model.instr_encoder.style_query.data.copy_(
+                        t3_model.instr_encoder.query.data
+                    )
+                logger.info("  -> Copied query → style_query for T3 training init")
+
+            if hasattr(t3_model.instr_encoder, "style_attn") and hasattr(
+                t3_model.instr_encoder, "attn"
+            ):
+                t3_model.instr_encoder.style_attn.load_state_dict(
+                    t3_model.instr_encoder.attn.state_dict()
+                )
+                logger.info("  -> Copied attn → style_attn for T3 training init")
+
     # ============ Set T3 Trainable Parameters ============
     if model_args.freeze_t3:
         # Freeze ALL T3 parameters first
@@ -1099,13 +1119,29 @@ def main():
             param.requires_grad = True
         logger.info("T3 model set to FULLY trainable (--freeze_t3 disabled).")
 
-    # ============ Freeze InstructionEncoder COMPLETELY ============
-    # (Not just T5, but also Query, Attention, and any projection layers)
+    # ============ Freeze InstructionEncoder - Except style_query/style_attn ============
+    # Freeze T5, query, attn (mapper weights), but train style_query/style_attn (T3 weights)
     if hasattr(t3_model, "instr_encoder"):
         for param in t3_model.instr_encoder.parameters():
             param.requires_grad = False
         instr_enc_params = sum(p.numel() for p in t3_model.instr_encoder.parameters())
-        logger.info(f"InstructionEncoder FULLY frozen ({instr_enc_params:,} params).")
+        logger.info(f"InstructionEncoder frozen ({instr_enc_params:,} params).")
+
+        # UNFREEZE style_query and style_attn for T3 training
+        style_trainable = 0
+        if hasattr(t3_model.instr_encoder, "style_query"):
+            t3_model.instr_encoder.style_query.requires_grad = True
+            style_trainable += t3_model.instr_encoder.style_query.numel()
+            logger.info("  -> style_query UNFROZEN (trainable)")
+
+        if hasattr(t3_model.instr_encoder, "style_attn"):
+            for param in t3_model.instr_encoder.style_attn.parameters():
+                param.requires_grad = True
+                style_trainable += param.numel()
+            logger.info("  -> style_attn UNFROZEN (trainable)")
+
+        if style_trainable > 0:
+            logger.info(f"  -> Total style_* trainable params: {style_trainable:,}")
 
         # FIX SAFETENSORS ERROR: Unshare weights between t5.shared and t5.encoder.embed_tokens
         # Safetensors does not allow shared tensors. Since we freeze this anyway, cloning is safe.
@@ -1469,9 +1505,8 @@ def main():
         finetuned_t3_state_dict = t3_to_save.state_dict()
 
         # ========== OPTIMIZATION: Filter out frozen InstructionEncoder weights ==========
-        # InstructionEncoder is FROZEN during Stage 2 and its weights come from mapper.pt.
-        # T5 weights will be loaded fresh from HF cache at inference time.
-        # Adapter weights (query, attn) come from mapper.pt['encoder'].
+        # InstructionEncoder T5, query, attn are FROZEN (weights come from mapper.pt).
+        # BUT style_query/style_attn are TRAINED and must be saved!
         original_keys = len(finetuned_t3_state_dict)
         original_size_mb = (
             sum(v.numel() * v.element_size() for v in finetuned_t3_state_dict.values())
@@ -1479,11 +1514,12 @@ def main():
             / 1024
         )
 
-        # Filter out ALL keys that start with 'instr_encoder.' (frozen - both T5 and adapters)
+        # Filter: Keep everything EXCEPT instr_encoder.* (but KEEP instr_encoder.style_*)
         finetuned_t3_state_dict = {
             k: v.clone().contiguous()
             for k, v in finetuned_t3_state_dict.items()
             if not k.startswith("instr_encoder.")
+            or k.startswith("instr_encoder.style_")  # Keep trained style adapters
         }
 
         filtered_keys = len(finetuned_t3_state_dict)

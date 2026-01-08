@@ -441,10 +441,18 @@ class InstructionChatterBox:
         t3_ckpt_dir = Path(t3_ckpt_dir)
         mapper_ckpt_path = Path(mapper_ckpt_path)
 
-        # Load T3 (finetuned)
+        # Load T3 (finetuned) - includes style_query/style_attn if trained
         print(f"Loading T3 from {t3_ckpt_dir}...")
         t3 = T3()
         t3_state = load_file(t3_ckpt_dir / "t3_cfg.safetensors")
+
+        # Check if T3 checkpoint contains style adapter weights
+        style_keys = [
+            k for k in t3_state.keys() if k.startswith("instr_encoder.style_")
+        ]
+        if style_keys:
+            print(f"  -> Found {len(style_keys)} style adapter keys in T3 checkpoint")
+
         missing_keys, unexpected_keys = t3.load_state_dict(t3_state, strict=False)
         if len(missing_keys) > 0:
             print(f"  -> Missing keys (adapter/encoder): {len(missing_keys)}")
@@ -459,13 +467,14 @@ class InstructionChatterBox:
         mapper.load_state_dict(mapper_ckpt["mapper"])
         mapper.to(device).eval()
 
-        # Load InstructionEncoder weights into T3
+        # Load InstructionEncoder weights (query/attn from mapper) into T3
+        # Note: style_query/style_attn already loaded from T3 checkpoint above
         if "encoder" in mapper_ckpt and hasattr(t3, "instr_encoder"):
             missing, unexpected = t3.instr_encoder.load_state_dict(
                 mapper_ckpt["encoder"], strict=False
             )
             print(
-                f"  -> Loaded InstructionEncoder weights ({len(mapper_ckpt['encoder'])} keys)"
+                f"  -> Loaded mapper encoder weights ({len(mapper_ckpt['encoder'])} keys)"
             )
 
         # Load S3Gen
@@ -521,8 +530,10 @@ class InstructionChatterBox:
         instruction_ids = instruction_inputs.input_ids.to(self.device)
         attention_mask = instruction_inputs.attention_mask.to(self.device)
 
-        # 2. Get style embedding from InstructionEncoder
-        style_emb = self.t3.instr_encoder(instruction_ids, attention_mask)
+        # 2. Get style embedding from InstructionEncoder (use mapper's query/attn)
+        style_emb = self.t3.instr_encoder(
+            instruction_ids, attention_mask, use_for="mapper"
+        )
 
         # 3. Predict speaker_emb [256] and x_vector [192] from Mapper
         spk_emb, x_vector = self.mapper.inference(style_emb)

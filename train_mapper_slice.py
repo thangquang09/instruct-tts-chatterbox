@@ -272,15 +272,14 @@ def train_epoch(
         attention_mask = batch["attention_mask"].to(device)
         gt_spk_emb = batch["gt_spk_emb"].to(device)
         gt_x_vector = batch["gt_x_vector"].to(device)
-	
 
         # gt_spk_emb = F.normalize(gt_spk_emb, p=2, dim=-1) # chưa cần vì spk_emb đã Norm sẵn rồi.
         gt_x_vector = F.normalize(gt_x_vector, p=2, dim=-1)
         # Create target latent: [SpkEmb | XVec]
         x_1 = create_fixed_target(gt_spk_emb, gt_x_vector)
 
-        # Encode instruction
-        style_emb = encoder_ddp(input_ids, attention_mask)
+        # Encode instruction (use mapper's query/attn)
+        style_emb = encoder_ddp(input_ids, attention_mask, use_for="mapper")
 
         # Flow Matching: Sample noise and timestep
         batch_size = style_emb.shape[0]
@@ -377,8 +376,8 @@ def validate(
             gt_spk_emb = batch["gt_spk_emb"].to(device)
             gt_x_vector = batch["gt_x_vector"].to(device)
 
-            # Predict via ODE solver
-            style_emb = encoder_ddp(input_ids, attention_mask)
+            # Predict via ODE solver (use mapper's query/attn)
+            style_emb = encoder_ddp(input_ids, attention_mask, use_for="mapper")
             pred_spk_emb, pred_x_vector = mapper_module.inference(style_emb)
 
             # Cosine similarity

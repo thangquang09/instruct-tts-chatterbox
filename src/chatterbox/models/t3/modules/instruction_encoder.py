@@ -47,7 +47,7 @@ class InstructionEncoderT5(nn.Module):
 
         self.hidden_size = self.t5.config.d_model  # 1024 for flan-t5-large
 
-        # Trainable attention pooling components
+        # FOR MAPPER: identity only
         # query: Learnable query vector for cross-attention
         self.query = nn.Parameter(
             torch.randn(1, 1, self.hidden_size) * 0.02
@@ -55,6 +55,12 @@ class InstructionEncoderT5(nn.Module):
 
         # attn: Cross-attention to extract style from T5 hidden states
         self.attn = nn.MultiheadAttention(
+            embed_dim=self.hidden_size, num_heads=8, batch_first=True
+        )
+
+        # FOR T3: extract style only
+        self.style_query = nn.Parameter(torch.randn(1, 1, self.hidden_size) * 0.02)
+        self.style_attn = nn.MultiheadAttention(
             embed_dim=self.hidden_size, num_heads=8, batch_first=True
         )
 
@@ -66,11 +72,19 @@ class InstructionEncoderT5(nn.Module):
         if self.attn.out_proj.bias is not None:
             nn.init.zeros_(self.attn.out_proj.bias)
 
-    def forward(self, input_ids, attention_mask):
+        nn.init.xavier_uniform_(self.style_attn.in_proj_weight)
+        nn.init.xavier_uniform_(self.style_attn.out_proj.weight)
+        if self.style_attn.in_proj_bias is not None:
+            nn.init.zeros_(self.style_attn.in_proj_bias)
+        if self.style_attn.out_proj.bias is not None:
+            nn.init.zeros_(self.style_attn.out_proj.bias)
+
+    def forward(self, input_ids, attention_mask, use_for):
         """
         Args:
             input_ids: [Batch, Seq_Len] - Tokenized instruction text
             attention_mask: [Batch, Seq_Len] - 1 for real tokens, 0 for padding
+            use_for: str - "mapper" (Identity) or "t3" (Style)
 
         Returns:
             style_emb: [Batch, hidden_size=1024] - Style embedding vector
@@ -84,7 +98,8 @@ class InstructionEncoderT5(nn.Module):
 
             # Attention Pooling (trainable, FP32)
             batch_size = input_ids.shape[0]
-            query = self.query.float().expand(batch_size, -1, -1)
+            query = self.query if use_for == "mapper" else self.style_query
+            query = query.float().expand(batch_size, -1, -1)
 
             # Prepare key_padding_mask for PyTorch MultiheadAttention
             key_padding_mask = (attention_mask == 0).to(
@@ -97,7 +112,8 @@ class InstructionEncoderT5(nn.Module):
                 key_padding_mask[all_masked] = False
 
             # Cross-attention: Query attends to T5 hidden states
-            style_emb, _ = self.attn(
+            attn = self.attn if use_for == "mapper" else self.style_attn
+            style_emb, _ = attn(
                 query,
                 encoder_hidden_states,
                 encoder_hidden_states,

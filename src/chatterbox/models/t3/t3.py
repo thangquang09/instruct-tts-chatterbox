@@ -179,7 +179,7 @@ class T3(nn.Module):
 
             # Encode: [Batch, Seq] -> [Batch, 1024]
             instruction_emb = self.instr_encoder(
-                instruction_input_ids, instruction_attention_mask
+                instruction_input_ids, instruction_attention_mask, use_for="t3"
             )
 
             # Ensure instruction_emb has same dtype as embeds (for FP16 compatibility)
@@ -430,7 +430,7 @@ class T3(nn.Module):
             instruction_attention_mask = instruction_attention_mask.to(self.device)
 
             instruction_emb = self.instr_encoder(
-                instruction_input_ids, instruction_attention_mask
+                instruction_input_ids, instruction_attention_mask, use_for="t3"
             )
 
             # Align dtype with embeddings (important for inference)
