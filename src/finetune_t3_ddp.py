@@ -1072,24 +1072,21 @@ def main():
                     f"  -> [VERIFY] InstructionEncoder.attn.out_proj L2 norm: {attn_out_norm:.4f}"
                 )
 
-            # ============ Copy mapper weights to T3's style adapters ============
-            # Initialize style_query/style_attn from trained mapper's query/attn
-            if hasattr(t3_model.instr_encoder, "style_query") and hasattr(
-                t3_model.instr_encoder, "query"
-            ):
-                with torch.no_grad():
-                    t3_model.instr_encoder.style_query.data.copy_(
-                        t3_model.instr_encoder.query.data
-                    )
-                logger.info("  -> Copied query → style_query for T3 training init")
-
-            if hasattr(t3_model.instr_encoder, "style_attn") and hasattr(
-                t3_model.instr_encoder, "attn"
-            ):
-                t3_model.instr_encoder.style_attn.load_state_dict(
-                    t3_model.instr_encoder.attn.state_dict()
+            # ============ style_query/style_attn ============
+            # These will train from random init (not copied from mapper)
+            # User has sufficient data for training from scratch
+            if hasattr(t3_model.instr_encoder, "style_query"):
+                style_q_norm = t3_model.instr_encoder.style_query.data.norm().item()
+                logger.info(
+                    f"  -> style_query will train from random init (L2 norm: {style_q_norm:.4f})"
                 )
-                logger.info("  -> Copied attn → style_attn for T3 training init")
+            if hasattr(t3_model.instr_encoder, "style_attn"):
+                style_a_norm = (
+                    t3_model.instr_encoder.style_attn.out_proj.weight.data.norm().item()
+                )
+                logger.info(
+                    f"  -> style_attn will train from random init (L2 norm: {style_a_norm:.4f})"
+                )
 
     # ============ Set T3 Trainable Parameters ============
     if model_args.freeze_t3:
