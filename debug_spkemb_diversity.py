@@ -223,7 +223,7 @@ def main():
     parser.add_argument(
         "--mapper_ckpt",
         type=str,
-        default="checkpoints/mapper_slice_v4/best_model.pt",
+        default="checkpoints/mapper_flow/best_model.pt",
         help="Path to mapper checkpoint",
     )
     parser.add_argument(

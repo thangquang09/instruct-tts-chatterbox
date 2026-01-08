@@ -4,6 +4,8 @@
 
 ---
 
+Ta sẽ sử dụng uv run trong project này.
+
 ## 1. Tổng quan Kiến trúc
 
 Dự án mở rộng **Chatterbox T3** để điều khiển giọng nói bằng **Instruction Text** thay vì chỉ dùng Reference Audio.
@@ -47,7 +49,7 @@ Dự án mở rộng **Chatterbox T3** để điều khiển giọng nói bằng
 
 ```python
 class InstructionEncoder(nn.Module):
-    def __init__(self, model_name="google/flan-t5-large", output_dim=1024):
+    def __init__(self, model_name="google/flan-t5-large"):
         super().__init__()
         self.t5 = T5EncoderModel.from_pretrained(model_name)
         
@@ -60,12 +62,11 @@ class InstructionEncoder(nn.Module):
         for param in self.t5.parameters():
             param.requires_grad = False
             
-        self.hidden_size = self.t5.config.d_model
+        self.hidden_size = self.t5.config.d_model  # 1024 for flan-t5-large
         
-        # Trainable components với proper initialization
-        self.query = nn.Parameter(torch.randn(1, 1, self.hidden_size) * 0.02)  # Scaled init!
+        # Trainable components (NO projection - output is hidden_size=1024)
+        self.query = nn.Parameter(torch.randn(1, 1, self.hidden_size) * 0.02)
         self.attn = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8, batch_first=True)
-        self.proj = nn.Linear(self.hidden_size, output_dim)
         
         # Xavier init for stability
         nn.init.xavier_uniform_(self.attn.in_proj_weight)
@@ -139,7 +140,8 @@ class T3(nn.Module):
         self.tfmr = CustomLlamaModel(self.cfg, adapter_config)
         
         # InstructionEncoder - T5 frozen inside, adapters trainable
-        self.instr_encoder = InstructionEncoder("google/flan-t5-large", 1024)
+        # ⚠️ No output_dim argument - output size is hidden_size (1024)
+        self.instr_encoder = InstructionEncoder("google/flan-t5-large")
         # ⚠️ Do NOT freeze entire instr_encoder here - let finetune script control it
 
     def forward(self, ..., instruction_input_ids=None, instruction_attention_mask=None):
@@ -160,11 +162,11 @@ class T3(nn.Module):
 
 ---
 
-## 3. Training Script Key Points
+## 3. Training Script - Stage 2: T3 Finetuning với Mapper
 
 **File:** `src/finetune_t3.py`
 
-### 3.1. Freezing Strategy
+### 3.1. Freezing Strategy (Stage 2)
 
 ```python
 # 1. Freeze Voice Encoder và S3Gen
@@ -173,17 +175,54 @@ for param in model.ve.parameters():
 for param in model.s3gen.parameters():
     param.requires_grad = False
 
-# 2. Unfreeze T3 (main model)
+# 2. Load Mapper và InstructionEncoder từ checkpoint
+mapper_ckpt = torch.load("./checkpoints/mapper_phase2/best_model.pt")
+instruction_mapper = InstructionMapper()
+instruction_mapper.load_state_dict(mapper_ckpt["mapper"])
+instruction_mapper.eval()  # Freeze
+
+# Load InstructionEncoder weights
+model.t3.instr_encoder.load_state_dict(mapper_ckpt["encoder"], strict=False)
+
+# 3. Unfreeze T3 (main model)
 for param in model.t3.parameters():
     param.requires_grad = True
 
-# 3. ⚠️ Re-freeze T5 inside InstructionEncoder (chỉ adapter trainable)
-if hasattr(model.t3, 'instr_encoder') and hasattr(model.t3.instr_encoder, 't5'):
-    for param in model.t3.instr_encoder.t5.parameters():
-        param.requires_grad = False
+# 4. ⚠️ Freeze ENTIRE InstructionEncoder (NOT just T5)
+for param in model.t3.instr_encoder.parameters():
+    param.requires_grad = False
 ```
 
-### 3.2. Loss Handling Edge Case
+**Trainable Components (Stage 2):**
+| Component | Trainable | Ghi chú |
+|-----------|-----------|--------|
+| LlamaModel | ✅ Yes | Main backbone (~520M) |
+| AdaRMSNorm Adapters | ✅ Yes | 30 layers × 2 adapters |
+| Text/Speech Embeddings | ✅ Yes | Input embeddings |
+| Text/Speech Heads | ✅ Yes | Output heads |
+| InstructionEncoder | ❄️ **FROZEN** | Weights from Mapper |
+| InstructionMapper | ❄️ **FROZEN** | For SpkEmb prediction |
+| VoiceEncoder, S3Gen | ❄️ Frozen | Original pretrained |
+
+### 3.2. 50/50 Mixing Strategy
+
+Mỗi batch được chia random 50/50:
+
+```python
+if self.training and self.mapper is not None:
+    use_instruction = torch.rand(B) < 0.5  # Per-sample random
+    
+    # Instruction-Only samples:
+    # - SpkEmb = Mapper(InstructionEncoder(instruction))
+    # - PromptTokens = zeros (no reference audio)
+    
+    # Audio-Only samples:
+    # - SpkEmb = Ground Truth from VoiceEncoder
+    # - PromptTokens = Ground Truth
+    # - Instruction attention_mask = 0 (masked)
+```
+
+### 3.3. Loss Handling Edge Case
 
 ```python
 def loss(self, logits_for_speech, labels_speech, ...):
@@ -196,37 +235,25 @@ def loss(self, logits_for_speech, labels_speech, ...):
                                       labels_speech, ignore_index=IGNORE_ID)
 ```
 
-### 3.3. Saving với Safetensors
-
-```python
-# ⚠️ Clone tensors to avoid shared memory issue (T5 tied weights)
-finetuned_t3_state_dict = {k: v.clone().contiguous() 
-                           for k, v in model.t3.state_dict().items()}
-save_file(finetuned_t3_state_dict, output_path)
-```
-
----
-
-## 4. Training Command
+## 4. Training Command (Stage 2)
 
 ```bash
-# ⚠️ KHÔNG dùng --fp16 (gây NaN trong InstructionEncoder)
-CUDA_VISIBLE_DEVICES=0 uv run accelerate launch src/finetune_t3.py \
+bash t3_finetune.sh  # Full training
+bash t3_finetune.sh --mock  # Quick test (20 steps)
+```
+
+**Script arguments:**
+```bash
+CUDA_VISIBLE_DEVICES=1 python src/finetune_t3.py \
     --do_train \
-    --output_dir "./chkpt/instruct_tts_v1" \
-    --model_name_or_path "ResembleAI/Chatterbox" \
+    --mapper_ckpt_path "./checkpoints/mapper_phase2/best_model.pt" \
+    --instruction_dropout_prob 0.5 \  # 50/50 mixing
     --metadata_file "captts_sft_expresso.txt" \
-    --instruction_column_name "caption" \
     --learning_rate 1e-5 \
     --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 8 \
-    --num_train_epochs 1 \
-    --save_steps 500 \
-    --logging_steps 10 \
     --freeze_voice_encoder True \
-    --freeze_s3gen True \
-    --dataloader_num_workers 8 \
-    --save_safetensors False
+    --freeze_s3gen True
 ```
 
 ---
@@ -297,12 +324,12 @@ Chi tiết: Xem `Troubleshooting_Tips.md`
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    2-STAGE TRAINING STRATEGY                              │
+│                    2-STAGE TRAINING STRATEGY                             │
 ├──────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
+│                                                                          │
 │  STAGE 1: Train Instruction Mapper (Riêng biệt)                          │
-│  ═══════════════════════════════════════════════                          │
-│                                                                           │
+│  ═══════════════════════════════════════════════                         │
+│                                                                          │
 │  Instruction ──► [T5] ──► [Query+Attn] ──► style_emb ──► [Mapper]        │
 │     Text       FREEZE      TRAIN              │           TRAIN          │
 │                                               │              │           │
@@ -315,16 +342,16 @@ Chi tiết: Xem `Troubleshooting_Tips.md`
 │                            ──► [CAM++]  ─────►│   Flow Matching   │      │
 │                                               │   Loss (MSE)      │      │
 │                                               └───────────────────┘      │
-│                                                                           │
+│                                                                          │
 │  STAGE 2: Finetune T3 (Sử dụng Mapper đã train)                          │
 │  ══════════════════════════════════════════════                          │
-│                                                                           │
+│                                                                          │
 │  Instruction ──► [T5+Query+Attn] ──► style_emb ──► [proj] ──► T3         │
 │                       FREEZE              │        TRAIN      TRAIN      │
 │                                           ▼                              │
 │                                    [Mapper Heads] (FREEZE)               │
 │                                     → SpkEmb, X-Vec → S3Gen              │
-│                                                                           │
+│                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -443,3 +470,45 @@ model.instruction_mapper.eval()  # Freeze mapper in Stage 2
 | `v_pred` | [B, 512] | Predicted velocity |
 | `spk_emb` | [B, 256] | Speaker Embedding (cho T3 T3Cond) |
 | `x_vector` | [B, 192] | CAM++ X-Vector (cho S3Gen) |
+
+## 9. Weight Loading Strategy
+
+After the user's update to finetune_t3.py , the checkpoint structure is:
+
+![alt text](image.png)
+
+
+```
+Total items found: 305267
+Sampling 10000 items for analysis...
+
+############################################################
+NORM STATISTICS REPORT
+############################################################
+
+==================== Speaker Embedding (VoiceEncoder) ====================
+Sample Count: 10000
+Mean Norm:    1.0000
+Std Dev:      0.0000
+Min Norm:     1.0000
+Max Norm:     1.0000
+--------------------------------------------------
+✅ OK: Speaker Embedding (VoiceEncoder) appears to be already normalized (Unit Vector).
+
+==================== X-Vector (CAMPPlus) ====================
+Sample Count: 10000
+Mean Norm:    14.0775
+Std Dev:      1.4688
+Min Norm:     9.5379
+Max Norm:     21.9082
+--------------------------------------------------
+⚠️  WARNING: X-Vector (CAMPPlus) has very large norm (~14.08).
+   -> Recommendation: Apply Pre-Normalization or L2 Normalize in code.
+
+📊 COMPARISON:
+Ratio (X-Vec / Spk): 14.08
+❌ IMBALANCE DETECTED: One vector type is significantly larger than the other.
+   -> This causes MSE Loss to focus only on the larger vector.
+   -> ACTION: Normalize both inputs to unit length (norm=1) before training.
+
+```

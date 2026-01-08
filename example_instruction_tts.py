@@ -34,8 +34,8 @@ def main():
     # =================== Configuration ===================
 
     # Checkpoint paths
-    T3_CKPT_DIR = "checkpoints/t3_instruct_ddp_v2"
-    MAPPER_CKPT = "checkpoints/mapper_slice_v4/best_model.pt"
+    T3_CKPT_DIR = "./checkpoints/t3_instruct_ddp"
+    MAPPER_CKPT = "checkpoints/mapper_flow/best_model.pt"
 
     # Valid directory
     VALID_DIR = "data/final_data_test.txt"
