@@ -98,6 +98,12 @@ class ModelArguments:
             "help": "Probability of using instruction-only mode (mapper predicts SpkEmb, prompt=zeros). Default: 0.5 (50/50 split)."
         },
     )
+    freeze_t3: bool = field(
+        default=False,
+        metadata={
+            "help": "Freeze T3 backbone (Llama layers), only train AdaRMSNorm adapters. Recommended for small datasets to avoid catastrophic forgetting."
+        },
+    )
 
 
 @dataclass
@@ -1065,10 +1071,33 @@ def main():
                     f"  -> [VERIFY] InstructionEncoder.attn.out_proj L2 norm: {attn_out_norm:.4f}"
                 )
 
-    # Set T3 model to trainable
-    for param in t3_model.parameters():
-        param.requires_grad = True
-    logger.info("T3 model set to trainable.")
+    # ============ Set T3 Trainable Parameters ============
+    if model_args.freeze_t3:
+        # Freeze ALL T3 parameters first
+        for param in t3_model.parameters():
+            param.requires_grad = False
+        logger.info("T3 backbone FROZEN (--freeze_t3 enabled).")
+
+        # Unfreeze ONLY AdaRMSNorm Adapters
+        adapter_params = 0
+        if hasattr(t3_model, "tfmr") and hasattr(t3_model.tfmr, "layers"):
+            for layer in t3_model.tfmr.layers:
+                if hasattr(layer, "input_adapter"):
+                    for param in layer.input_adapter.parameters():
+                        param.requires_grad = True
+                        adapter_params += param.numel()
+                if hasattr(layer, "post_attention_adapter"):
+                    for param in layer.post_attention_adapter.parameters():
+                        param.requires_grad = True
+                        adapter_params += param.numel()
+        logger.info(
+            f"AdaRMSNorm Adapters UNFROZEN ({adapter_params:,} trainable params)."
+        )
+    else:
+        # Original behavior: train full T3
+        for param in t3_model.parameters():
+            param.requires_grad = True
+        logger.info("T3 model set to FULLY trainable (--freeze_t3 disabled).")
 
     # ============ Freeze InstructionEncoder COMPLETELY ============
     # (Not just T5, but also Query, Attention, and any projection layers)
