@@ -44,11 +44,11 @@ MODEL_NAME="ResembleAI/chatterbox"
 MAPPER_CKPT="checkpoints/mapper_flow/best_model.pt"
 
 # Output
-OUTPUT_DIR="./checkpoints/t3_instruct_ddp"
+OUTPUT_DIR="./checkpoints/t3_instruct_ddp_1query"
 
 # =================== DDP Configuration ===================
-NUM_GPUS=4
-GPU_IDS="0,1,2,3"           # Change based on available GPUs
+NUM_GPUS=2
+GPU_IDS="0,1"           # Change based on available GPUs
 MASTER_PORT=29500         # Must be unique if other DDP jobs running
 
 # Training settings (Per-GPU batch size)
@@ -142,7 +142,7 @@ echo "=============================================="
 
 # WandB settings
 WANDB_PROJECT="instruct-tts-t3"
-WANDB_RUN_NAME="t3-finetune-ddp-v3-freeze-t3"
+WANDB_RUN_NAME="t3-finetune-ddp-v3-freeze-t3_1query"
 export WANDB_PROJECT
 
 # =================== Launch DDP Training ===================
