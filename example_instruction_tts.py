@@ -16,6 +16,8 @@ Requirements:
     - Finetuned T3 checkpoint (t3_instruct_ddp/)
 """
 
+import os
+import shutil
 import torch
 import torchaudio
 from pathlib import Path
@@ -32,11 +34,14 @@ def main():
     # =================== Configuration ===================
 
     # Checkpoint paths
-    T3_CKPT_DIR = "checkpoints/t3_instruct_ddp"
+    T3_CKPT_DIR = "checkpoints/t3_instruct_ddp_v2"
     MAPPER_CKPT = "checkpoints/mapper_slice_v4/best_model.pt"
 
+    # Valid directory
+    VALID_DIR = "data/final_data_test.txt"
+
     # Output directory
-    OUTPUT_DIR = Path("./outputs/instruction_tts")
+    OUTPUT_DIR = Path("./outputs/instruction_tts_test/")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Device
@@ -55,51 +60,40 @@ def main():
         device=DEVICE,
     )
 
-    # =================== Test Cases ===================
-    instructions = [
-        # --- GROUP 1: CẢM XÚC ĐỐI LẬP ---
-        "A young woman speaking in a very happy, excited, and laughing tone.",
-        "A sad man, speaking slowly with a depressed and crying voice.",
-        "An angry male voice, shouting and aggressive.",
-        "A scared young girl, whispering and trembling with fear.",
-        # --- GROUP 2: CAO ĐỘ & ĐỘ TUỔI ---
-        "A man with a very deep, bass-heavy, and dominant voice.",
-        "A cute little boy with a very high-pitched and squeaky voice.",
-        "An old grandfather with a raspy, shaky, and tired voice.",
-        # --- GROUP 3: PHONG CÁCH ĐẶC BIỆT ---
-        "A mysterious woman whispering softly into the microphone.",
-        "A robotic voice, monotone, flat, and without emotion.",
-        "A very fast-talking and energetic salesperson.",
-        "A very slow, sleepy, and yawning voice.",
-    ]
+    # =================== Load Data ===================
 
-    output_names = [
-        # --- GROUP 1 ---
-        "young_woman_happy_laughing",
-        "man_sad_depressed_crying",
-        "male_angry_shouting",
-        "girl_scared_whispering",
-        # --- GROUP 2 ---
-        "man_deep_bass_dominant",
-        "boy_high_pitch_squeaky",
-        "grandfather_raspy_shaky",
-        # --- GROUP 3 ---
-        "woman_mysterious_whisper_asmr",
-        "robotic_monotone_flat",
-        "salesperson_fast_energetic",
-        "voice_slow_sleepy_yawning",
-    ]
+    if not os.path.exists(VALID_DIR):
+        raise FileNotFoundError(f"Không tìm thấy file data tại: {VALID_DIR}")
 
-    text = "Pig farmers are completely despondent."
+    with open(VALID_DIR, "r", encoding="utf-8") as f:  # Thêm encoding utf-8 cho an toàn
+        lines = f.readlines()
 
-    test_cases = [
-        {
-            "text": text,
-            "instruction": instructions[i],
-            "output_name": output_names[i],
-        }
-        for i in range(len(instructions))
-    ]
+    # tạo folder output
+    GT_PATH = OUTPUT_DIR / "gt"  # Dùng Path object tiện hơn
+    GT_PATH.mkdir(parents=True, exist_ok=True)
+
+    test_cases = []
+    # random 10 samples trong lines
+    import random
+
+    random.shuffle(lines)
+    lines = lines[:10]
+
+    for line in lines:
+        # .strip() để loại bỏ \n ở đầu cuối
+        parts = line.strip().split("|")
+
+        # Kiểm tra xem dòng có đủ 3 phần không để tránh lỗi index
+        if len(parts) >= 3:
+            test_cases.append(
+                {
+                    "gt_path": parts[0],
+                    "text": parts[1],
+                    "instruction": parts[2],
+                    # Lấy tên file an toàn hơn bằng Path
+                    "output_name": Path(parts[0]).stem,
+                }
+            )
 
     # =================== Generate Speech ===================
 
@@ -117,19 +111,26 @@ def main():
             wav = model.generate(
                 text=case["text"],
                 instruction=case["instruction"],
-                exaggeration=0.5,
-                cfg_weight=0.5,
-                temperature=0.8,
             )
 
             # Save
             output_path = OUTPUT_DIR / f"{case['output_name']}.wav"
             torchaudio.save(
                 str(output_path),
-                wav,
+                wav.cpu(),
                 sample_rate=model.sr,
             )
-            print(f"  ✓ Saved to: {output_path}")
+            print(f"  ✓ Gen Saved to: {output_path}")
+
+            # Copy Ground Truth (GT)
+            src_gt_path = Path(case["gt_path"])
+            dst_gt_path = GT_PATH / f"{case['output_name']}.wav"
+
+            if src_gt_path.exists():
+                shutil.copy(src_gt_path, dst_gt_path)
+                print(f"  ✓ GT Copied to: {dst_gt_path}")
+            else:
+                print(f"  ! GT file not found at source: {src_gt_path}")
 
         except Exception as e:
             print(f"  ✗ Error: {e}")

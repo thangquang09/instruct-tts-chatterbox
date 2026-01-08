@@ -22,7 +22,7 @@ from pathlib import Path
 
 # =================== Configuration ===================
 # Update these paths to match your setup
-T3_CKPT_DIR = Path("checkpoints/t3_instruct_ddp")
+T3_CKPT_DIR = Path("checkpoints/t3_instruct_ddp_v2")
 MAPPER_CKPT = Path("checkpoints/mapper_slice_v4/best_model.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
