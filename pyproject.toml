@@ -30,6 +30,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "pytest>=8.4.2",
     "peft>=0.17.1",
+    "utmosv2",
 ]
 
 [project.urls]
@@ -42,3 +43,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git" }

@@ -34,14 +34,14 @@ def main():
     # =================== Configuration ===================
 
     # Checkpoint paths
-    T3_CKPT_DIR = "./checkpoints/t3_instruct_ddp"
+    T3_CKPT_DIR = "checkpoints/t3_instruct_ddp_2query_unfreeze_t3"
     MAPPER_CKPT = "checkpoints/mapper_flow/best_model.pt"
 
     # Valid directory
     VALID_DIR = "data/final_data_test.txt"
 
     # Output directory
-    OUTPUT_DIR = Path("./outputs/instruction_tts_test/")
+    OUTPUT_DIR = Path("./outputs/instruction_tts_test/2query_unfreeze_t3")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Device
@@ -74,10 +74,10 @@ def main():
 
     test_cases = []
     # random 10 samples trong lines
-    import random
+    import numpy as np
 
-    random.shuffle(lines)
-    lines = lines[:10]
+    np.random.seed(42)
+    lines = np.random.choice(lines, 10, replace=False)
 
     for line in lines:
         # .strip() để loại bỏ \n ở đầu cuối
