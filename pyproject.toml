@@ -31,6 +31,10 @@ dependencies = [
     "pytest>=8.4.2",
     "peft>=0.17.1",
     "utmosv2",
+    "gradio==4.31.0",
+    "streamlit>=1.50.0",
+    "openai-whisper>=20250625",
+    "jiwer>=4.0.0",
 ]
 
 [project.urls]
