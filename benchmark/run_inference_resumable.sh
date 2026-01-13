@@ -23,9 +23,9 @@ cd /data1/speech/nhandt23/06_thang/instruct-tts-chatterbox
 # ===================== CONFIGURATION =====================
 # Parse GPU list from first argument (default: "0,1")
 GPU_LIST="${1:-0,1}"
-OUTPUT_SUBDIR="${2:-2query_t3_unfreeze}"
-T3_CKPT_DIR="${3:-checkpoints/t3_instruct_ddp_2query_unfreeze_t3}"
-PARTS_PER_GPU=3
+OUTPUT_SUBDIR="${2:-2query_t3_freeze}"
+T3_CKPT_DIR="${3:-checkpoints/t3_instruct_ddp_2query}"
+PARTS_PER_GPU=4
 
 # Convert comma-separated GPU list to array
 IFS=',' read -ra GPUS <<< "$GPU_LIST"

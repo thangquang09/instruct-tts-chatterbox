@@ -99,6 +99,14 @@ def get_accent(data, accent_model):
 
 
 # =================== DATA LOADING ===================
+def sanitize_id(raw_id: str) -> str:
+    """Sanitize ID for use as filename.
+
+    Replaces characters that are invalid in filenames (like '/') with '_'.
+    """
+    return raw_id.replace("/", "_").replace("\\", "_")
+
+
 def load_test_cases_from_txt(txt_path: str) -> list:
     """Load test cases from pipe-separated TXT file."""
     test_cases = []
@@ -111,7 +119,8 @@ def load_test_cases_from_txt(txt_path: str) -> list:
             if len(parts) != 3:
                 continue
             audio_name, text, instruction = parts
-            sample_id = audio_name.replace(".wav", "")
+            raw_id = audio_name.replace(".wav", "")
+            sample_id = sanitize_id(raw_id)
             test_cases.append(
                 {
                     "id": sample_id,

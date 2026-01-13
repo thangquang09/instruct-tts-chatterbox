@@ -30,13 +30,24 @@ def get_processed_ids(output_dir: Path) -> set:
     return processed
 
 
+def sanitize_id(raw_id: str) -> str:
+    """Sanitize ID for use as filename.
+
+    Replaces characters that are invalid in filenames (like '/') with '_'.
+    Example:
+        test-clean/8555/284447/8555_284447_000020_000002
+        -> test-clean_8555_284447_8555_284447_000020_000002
+    """
+    return raw_id.replace("/", "_").replace("\\", "_")
+
+
 def load_test_cases_from_txt(txt_path: str) -> list:
     """Load test cases from pipe-separated TXT file.
 
     Format: audio_name|text|instruction
     Example: p326_358.wav|Labour is providing none of these.|A mature, Australian male voice...
 
-    Uses audio_name (without .wav) as unique ID.
+    Uses sanitized audio_name (without .wav, with '/' replaced by '_') as unique ID.
     """
     test_cases = []
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -49,8 +60,9 @@ def load_test_cases_from_txt(txt_path: str) -> list:
                 print(f"Warning: Skipping malformed line: {line[:50]}...")
                 continue
             audio_name, text, instruction = parts
-            # Use audio_name without .wav as ID
-            sample_id = audio_name.replace(".wav", "")
+            # Use audio_name without .wav, sanitized for filename safety
+            raw_id = audio_name.replace(".wav", "")
+            sample_id = sanitize_id(raw_id)
             test_cases.append(
                 {
                     "id": sample_id,
