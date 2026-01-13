@@ -2,16 +2,15 @@
 Resumable Benchmark Inference for Instruction TTS.
 
 This script:
-1. Loads test metadata from CSV (with unique IDs)
+1. Loads test metadata from TXT file (pipe-separated: audio_name|text|instruction)
 2. Checks which files are already processed in output directory
 3. Only processes remaining files
-4. Names output files by their unique ID
+4. Names output files by audio_name (without .wav extension)
 """
 
 import os
 import sys
 import argparse
-import csv
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,18 +30,33 @@ def get_processed_ids(output_dir: Path) -> set:
     return processed
 
 
-def load_test_cases_from_csv(csv_path: str) -> list:
-    """Load test cases from CSV file."""
+def load_test_cases_from_txt(txt_path: str) -> list:
+    """Load test cases from pipe-separated TXT file.
+
+    Format: audio_name|text|instruction
+    Example: p326_358.wav|Labour is providing none of these.|A mature, Australian male voice...
+
+    Uses audio_name (without .wav) as unique ID.
+    """
     test_cases = []
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) != 3:
+                print(f"Warning: Skipping malformed line: {line[:50]}...")
+                continue
+            audio_name, text, instruction = parts
+            # Use audio_name without .wav as ID
+            sample_id = audio_name.replace(".wav", "")
             test_cases.append(
                 {
-                    "id": row["id"],
-                    "audio_path": row["audio_path"],
-                    "text": row["text"],
-                    "instruction": row["instruction"],
+                    "id": sample_id,
+                    "audio_name": audio_name,
+                    "text": text,
+                    "instruction": instruction,
                 }
             )
     return test_cases
@@ -79,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     # Paths
-    CSV_PATH = "benchmark/test_metadata.csv"
+    TXT_PATH = "data/full_test.txt"
     MAPPER_CKPT = "checkpoints/mapper_flow/best_model.pt"
     OUTPUT_DIR = Path(f"benchmark/output_wavs/{args.output_subdir}/")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,39 +107,45 @@ def main():
     print(f"Found {len(processed_ids)} already processed files in {OUTPUT_DIR}")
 
     # =================== Load All Test Cases ===================
-    if not os.path.exists(CSV_PATH):
-        raise FileNotFoundError(f"CSV metadata not found: {CSV_PATH}")
+    if not os.path.exists(TXT_PATH):
+        raise FileNotFoundError(f"Test data not found: {TXT_PATH}")
 
-    all_test_cases = load_test_cases_from_csv(CSV_PATH)
+    all_test_cases = load_test_cases_from_txt(TXT_PATH)
     total_samples = len(all_test_cases)
-    print(f"Total samples in CSV: {total_samples}")
+    print(f"Total samples in TXT: {total_samples}")
 
-    # =================== Filter Out Already Processed ===================
-    remaining_cases = [tc for tc in all_test_cases if tc["id"] not in processed_ids]
-    print(f"Remaining samples to process: {len(remaining_cases)}")
-
-    if not remaining_cases:
-        print("All samples already processed! Exiting.")
-        return
-
-    # =================== Split for Multi-GPU ===================
-    part_size = len(remaining_cases) // args.total_parts
+    # =================== Split for Multi-GPU (FIXED: Split on ALL data, not remaining) ===================
+    # IMPORTANT: Split based on ALL test cases to ensure each part always gets
+    # the same subset, regardless of how many times the script is restarted.
+    # This prevents samples from being missed or duplicated when processes restart.
+    part_size = len(all_test_cases) // args.total_parts
     start_idx = args.part * part_size
 
     # Last part takes all remaining samples
     if args.part == args.total_parts - 1:
-        end_idx = len(remaining_cases)
+        end_idx = len(all_test_cases)
     else:
         end_idx = start_idx + part_size
 
-    my_cases = remaining_cases[start_idx:end_idx]
+    # Get this part's fixed subset from ALL test cases
+    my_cases_all = all_test_cases[start_idx:end_idx]
+
+    # NOW filter out already processed samples from this part's subset
+    my_cases = [tc for tc in my_cases_all if tc["id"] not in processed_ids]
+
+    # Also calculate global remaining for display
+    total_remaining = len(
+        [tc for tc in all_test_cases if tc["id"] not in processed_ids]
+    )
 
     print(f"\n{'=' * 60}")
     print(f"Part {args.part}/{args.total_parts - 1}")
     print(
-        f"Processing {len(my_cases)} samples (indices {start_idx} to {end_idx - 1} of remaining)"
+        f"Assigned samples: {len(my_cases_all)} (indices {start_idx} to {end_idx - 1} of all)"
     )
-    print(f"Total remaining: {len(remaining_cases)}")
+    print(f"Already processed in this part: {len(my_cases_all) - len(my_cases)}")
+    print(f"Remaining to process in this part: {len(my_cases)}")
+    print(f"Total remaining globally: {total_remaining}")
     print(f"{'=' * 60}")
 
     if not my_cases:
@@ -165,6 +185,8 @@ def main():
             wav = model.generate(
                 text=case["text"],
                 instruction=case["instruction"],
+                temperature=1.0,
+                cfg_weight=0.3,
             )
 
             # Save with ID as filename

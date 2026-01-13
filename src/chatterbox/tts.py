@@ -503,7 +503,7 @@ class InstructionChatterBox:
         exaggeration: float = 0.5,
         cfg_weight: float = 0.5,
         temperature: float = 0.8,
-        max_instruction_len: int = 128,
+        max_instruction_len: int = 512,
     ) -> torch.Tensor:
         """
         Generate speech from text and instruction only (no reference audio).
