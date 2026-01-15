@@ -104,6 +104,12 @@ class ModelArguments:
             "help": "Freeze T3 backbone (Llama layers), only train AdaRMSNorm adapters. Recommended for small datasets to avoid catastrophic forgetting."
         },
     )
+    resume_t3_ckpt_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to a previously finetuned T3 checkpoint directory (containing t3_cfg.safetensors). Used to continue training from a prior finetuning run."
+        },
+    )
 
 
 @dataclass
@@ -387,7 +393,7 @@ class SpeechFineTuningDataset(Dataset):
             instruction_text,
             return_tensors="pt",
             truncation=True,
-            max_length=512,  # T5 limit, instruction hiếm khi dài hơn
+            max_length=1024,  # T5 max instruction length
             add_special_tokens=True,
         ).input_ids.squeeze(0)  # [Seq_Len]
 
@@ -1012,6 +1018,56 @@ def main():
         original_model_dir_for_copy = download_dir
 
     t3_model = chatterbox_model.t3
+
+    # ============ Resume from Previously Finetuned T3 Checkpoint (Optional) ============
+    if model_args.resume_t3_ckpt_path:
+        resume_path = Path(model_args.resume_t3_ckpt_path)
+        t3_safetensor_path = resume_path / "t3_cfg.safetensors"
+
+        if not t3_safetensor_path.exists():
+            raise ValueError(
+                f"Cannot resume: t3_cfg.safetensors not found in {resume_path}. "
+                f"Make sure --resume_t3_ckpt_path points to a valid finetuned T3 checkpoint directory."
+            )
+
+        logger.info(f"Resuming from finetuned T3 checkpoint: {t3_safetensor_path}")
+        from safetensors.torch import load_file as load_safetensors
+
+        finetuned_weights = load_safetensors(t3_safetensor_path)
+
+        # Load finetuned weights with strict=False (checkpoint may not include frozen T5 weights)
+        missing_keys, unexpected_keys = t3_model.load_state_dict(
+            finetuned_weights, strict=False
+        )
+
+        # Log loading results
+        loaded_keys = len(finetuned_weights)
+        logger.info(f"  -> Loaded {loaded_keys} keys from finetuned checkpoint")
+        if missing_keys:
+            # Filter out expected missing keys (T5 weights not saved in checkpoint)
+            truly_missing = [
+                k
+                for k in missing_keys
+                if not k.startswith("instr_encoder.t5.")
+                and not k.startswith("instr_encoder.query")
+                and not k.startswith("instr_encoder.attn")
+            ]
+            if truly_missing:
+                logger.warning(
+                    f"  -> Missing keys (may need attention): {truly_missing[:10]}..."
+                )
+            else:
+                logger.info(
+                    f"  -> Missing keys are expected frozen T5/mapper weights ({len(missing_keys)} keys)"
+                )
+        if unexpected_keys:
+            logger.warning(
+                f"  -> Unexpected keys in checkpoint: {unexpected_keys[:10]}..."
+            )
+
+        logger.info(
+            "Successfully loaded finetuned T3 weights. Continuing training from this checkpoint."
+        )
     chatterbox_t3_config_instance = t3_model.hp
 
     if model_args.freeze_voice_encoder:

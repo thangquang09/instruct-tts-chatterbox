@@ -18,7 +18,8 @@ set -e
 
 MOCK_MODE=false
 MAX_STEPS=-1
-FREEZE_T3=false
+FREEZE_T3=true
+RESUME_T3_CKPT=""
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -30,21 +31,24 @@ for arg in "$@"; do
         --freeze_t3)
             FREEZE_T3=true
             ;;
+        --resume_t3_ckpt=*)
+            RESUME_T3_CKPT="${arg#*=}"
+            ;;
     esac
 done
 
 # =================== Configuration ===================
 
 # Data paths
-TRAIN_MANIFEST="data/final_data.txt"
-VAL_MANIFEST="data/final_data_val.txt"
+TRAIN_MANIFEST="data/agenttts_train.txt"
+VAL_MANIFEST="data/agenttts_val.txt"
 
 # Model paths
 MODEL_NAME="ResembleAI/chatterbox"
 MAPPER_CKPT="checkpoints/mapper_flow/best_model.pt"
 
 # Output
-OUTPUT_DIR="./checkpoints/t3_instruct_ddp_2query_unfreeze_t3"
+OUTPUT_DIR="checkpoints/t3_instruct_ddp_2query_agentts"
 
 # =================== DDP Configuration ===================
 NUM_GPUS=4
@@ -52,9 +56,9 @@ GPU_IDS="0,1,2,3"           # Change based on available GPUs
 MASTER_PORT=29599         # Must be unique if other DDP jobs running
 
 # Training settings (Per-GPU batch size)
-NUM_EPOCHS=5
+NUM_EPOCHS=15
 BATCH_SIZE=6             
-LEARNING_RATE=1e-4
+LEARNING_RATE=1e-5
 WARMUP_RATIO=0.1
 GRAD_ACCUM=2          
 MAX_GRAD_NORM=1.0
@@ -71,7 +75,7 @@ LOGGING_STEPS=50
 SAVE_TOTAL_LIMIT=3
 
 # Cache settings (HIGHLY RECOMMENDED for DDP - run preprocess_training_cache.sh first)
-USE_CACHE=true
+USE_CACHE=false
 TRAIN_CACHE_DIR="./cache/t3_train"
 VAL_CACHE_DIR="./cache/t3_val"
 
@@ -111,6 +115,14 @@ else
     echo "T3 Backbone: TRAINABLE (full T3 finetuning)"
 fi
 
+if [ -n "$RESUME_T3_CKPT" ]; then
+    if [ ! -f "${RESUME_T3_CKPT}/t3_cfg.safetensors" ]; then
+        echo "ERROR: Resume checkpoint not found: ${RESUME_T3_CKPT}/t3_cfg.safetensors"
+        exit 1
+    fi
+    echo "Resume from: $RESUME_T3_CKPT"
+fi
+
 # Check required files exist
 if [ ! -f "$TRAIN_MANIFEST" ]; then
     echo "ERROR: Training manifest not found: $TRAIN_MANIFEST"
@@ -142,7 +154,7 @@ echo "=============================================="
 
 # WandB settings
 WANDB_PROJECT="instruct-tts-t3"
-WANDB_RUN_NAME="t3-finetune-ddp-v3-t3_2query"
+WANDB_RUN_NAME="t3-finetune-ddp-v3-t3_2query_agentts"
 export WANDB_PROJECT
 
 # =================== Launch DDP Training ===================
@@ -187,6 +199,7 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun \
     --train_cache_dir $TRAIN_CACHE_DIR \
     --eval_cache_dir $VAL_CACHE_DIR \
     --ddp_find_unused_parameters true \
+    $([ -n "$RESUME_T3_CKPT" ] && echo "--resume_t3_ckpt_path $RESUME_T3_CKPT") \
     $([ "$FREEZE_T3" = true ] && echo "--freeze_t3")
 
 echo ""
