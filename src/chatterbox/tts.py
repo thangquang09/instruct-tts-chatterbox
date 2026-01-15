@@ -296,7 +296,7 @@ class ChatterboxTTS:
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
-        max_instruction_len=128,
+        max_instruction_len=1024,
     ):
         """
         Generate speech with style controlled by a text instruction.
@@ -503,7 +503,7 @@ class InstructionChatterBox:
         exaggeration: float = 0.5,
         cfg_weight: float = 0.5,
         temperature: float = 0.8,
-        max_instruction_len: int = 512,
+        max_instruction_len: int = 1024,
     ) -> torch.Tensor:
         """
         Generate speech from text and instruction only (no reference audio).
